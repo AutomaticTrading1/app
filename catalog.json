@@ -4,10 +4,11 @@
       "platform": "mt5",
       "kind": "Experts",
       "file": "AT_OrderFlow_Footprint.ex5",
-      "version": "4.31",
+      "version": "4.32",
       "sha256": "fde987f8d895fc58d22478f7401a811a0745d9a3fb5ab3aec311e2f91f48fa59",
       "notes": "Footprint de order flow y multiherramientas.",
-      "min_app": "1.6"
+      "min_app": "1.6",
+      "manual": "AT_OrderFlow_Footprint.md"
     },
     {
       "platform": "mt5",

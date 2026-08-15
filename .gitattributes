@@ -1,0 +1,3 @@
+# Artefactos de distribucion: se publican byte a byte, sin conversion
+# de finales de linea, o el sha256 de catalog.json deja de cuadrar.
+/catalog/** -text
