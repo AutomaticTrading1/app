@@ -14,9 +14,9 @@
       "platform": "mt5",
       "kind": "Experts",
       "file": "AT_Wyckoff_induction.ex5",
-      "version": "3.00",
-      "sha256": "74dd09a2571516f7c7b2131c7e16d9dece70d6281d727b2118ac630c77d12fc5",
-      "notes": "Wyckoff induction para MetaTrader 5.",
+      "version": "3.10",
+      "sha256": "56e34321f4c39ef3272c18416ae306784a57cb11fa2c2f9c468879e5aa56c842",
+      "notes": "Modelo de induccion y liquidez. Ahora gestionado de fabrica: la aplicacion controla sus entradas con las reglas de riesgo de la cartera. El backtest no se ve afectado.",
       "min_app": "1.6"
     },
     {
