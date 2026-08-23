@@ -23,9 +23,9 @@
       "platform": "nt8",
       "kind": "AddOns",
       "file": "AutomaticTradingNT8.cs",
-      "version": "1.69",
-      "sha256": "e328dd4315be154cfcb8d60d694f7b0a9e00ac53e9667e1c10f66a0f2692b9c1",
-      "notes": "AddOn puente para NinjaTrader 8: gate de riesgo, copia de senales y datos compartidos con MT5.",
+      "version": "1.70",
+      "sha256": "998a48ef684801661d461196056e29a52349da31707313c99c02b5ac63472d53",
+      "notes": "AddOn puente para NinjaTrader 8: gate de riesgo, copia de senales y datos compartidos con MT5. Novedad: puentea TODAS las cuentas conectadas a la vez, cada una como su propio terminal en la aplicacion. Ya no hay que editar el .cs para elegir cuenta, y se pueden copiar operaciones entre dos cuentas del mismo NinjaTrader. Los datos de mercado los sirve una sola cuenta, asi que el volumen no se duplica. Una cuenta recien detectada entra con los limites por defecto (2 contratos totales, 1 por instrumento): revisalos en Control del Riesgo.",
       "min_app": "1.6"
     }
   ]

@@ -9,9 +9,23 @@
 //  INSTALACION:
 //    1. Copiar este archivo a Documents\NinjaTrader 8\bin\Custom\AddOns\
 //       (o Tools -> Import -> NinjaScript Add-On...).
-//    2. Ajustar la seccion CONFIGURACION (AccountName como minimo).
+//    2. Revisar la seccion CONFIGURACION (por defecto NO hay que tocar nada:
+//       se puentean TODAS las cuentas conectadas).
 //    3. Compilar en NinjaScript Editor (F5). Validar en Sim101 antes de real
 //       (ver documentation/GUIA_NT8_desde_te_mt5.md #7 - la leccion mas cara).
+//
+//  MULTI-CUENTA (a diferencia de MT5):
+//  MT5 ata un terminal a UNA cuenta; NinjaTrader tiene varias cuentas vivas en
+//  el mismo proceso (Sim101, DEMO..., real...). Cada cuenta se puentea por
+//  SEPARADO: su propia conexion TCP con terminal_id "NT8_<Cuenta>", su propio
+//  STATE, su propio gateo y sus propias ordenes. Para la app son terminales
+//  independientes, asi que la copia de señales entre dos cuentas NT8 del mismo
+//  NinjaTrader funciona igual que MT5 -> MT5.
+//
+//  El FEED de mercado (ticks, L2, historico, perfil) NO es de la cuenta sino de
+//  la conexion de datos: lo sirve UNA sola cuenta (la primera puenteada, ver
+//  _dataLink). Si lo sirvieran todas, cada operacion llegaria duplicada al
+//  buffer del servidor y el footprint contaria el volumen dos veces.
 //
 //  DOS MODOS DE GATEO (software comercial: soporta ambos a la vez):
 //    A) PREVENTIVO (estrategias propias): la Strategy llama a
@@ -61,8 +75,13 @@ namespace NinjaTrader.NinjaScript.AddOns
         // ===================== CONFIGURACION =====================
         private const string ServerHost = "127.0.0.1";
         private const int ServerPort = 5006;
-        private const string AccountName = "Sim101";   // EDITAR: cuenta/conexion NT8 (vacio "" = autodetectar la primera conectada)
+        // Cuentas a puentear. Vacio "" = TODAS las cuentas conectadas de este
+        // NinjaTrader (recomendado: no hay que editar nada y las cuentas nuevas
+        // aparecen solas en la app). Para limitarlo, lista separada por comas:
+        //   private const string AccountNames = "Sim101,DEMO3005427";
+        private const string AccountNames = "";
         private const int StatePeriodMs = 2000;         // frecuencia de STATE (estado de cuenta)
+        private const int AccountScanMs = 5000;         // cada cuanto se buscan cuentas nuevas/idas
         private const int PingPeriodMs = 5000;
         private const int CheckTradeTimeoutMs = 3000;
 
@@ -73,14 +92,53 @@ namespace NinjaTrader.NinjaScript.AddOns
         // orden (si sigue viva) o cierra la posicion (si ya lleno). Ponlo a
         // false si SOLO usas estrategias propias con CheckTrade explicito
         // (control preventivo, sin ventana reactiva).
+        //
+        // OJO con multi-cuenta: esto aplica a TODAS las cuentas puenteadas, y una
+        // cuenta recien descubierta entra en la app con los limites POR DEFECTO
+        // (2 contratos totales, 1 por instrumento). En una cuenta con posiciones
+        // mayores, una entrada de un tercero se cancelaria o se aplanaria hasta que
+        // se suban sus limites en Control del Riesgo. Con cuentas reales: o revisas
+        // sus limites en cuanto aparecen, o pones ReactiveMode = false, o limitas
+        // AccountNames a las cuentas que quieras gatear.
         private const bool ReactiveMode = true;
         // ===========================================================
 
         private static AutomaticTradingNT8 _instance;
-        private string _terminalId;
-        private string _accountName;
-        private Account _account;
         private volatile bool _running;
+
+        // Un AccountLink por cuenta puenteada, indexado por nombre de cuenta.
+        private readonly ConcurrentDictionary<string, AccountLink> _links =
+            new ConcurrentDictionary<string, AccountLink>();
+        // Cuenta que sirve el FEED de mercado (ticks/L2/historico/perfil). Una
+        // sola: ver la cabecera del archivo. Es la primera que se puentea.
+        private volatile AccountLink _dataLink;
+        private Thread _scanThread;
+
+        /// <summary>Conexion por la que sale TODO el feed de mercado.
+        ///
+        /// Los comandos de datos (CMD_STREAM/CMD_HISTORY/CMD_PROFILE/...) pueden
+        /// llegar por CUALQUIER cuenta —el servidor elige un cliente NT8 sin mirar
+        /// la cuenta— pero la respuesta sale siempre por esta, para que el buffer
+        /// del servidor reciba cada operacion UNA vez.</summary>
+        private SocketConn DataConn
+        {
+            get { var l = _dataLink; return l != null ? l.Conn : null; }
+        }
+
+        /// <summary>True si el feed tiene por donde salir ahora mismo.</summary>
+        private bool DataReady
+        {
+            get { var c = DataConn; return c != null && c.IsLoggedIn; }
+        }
+
+        /// <summary>Envia una linea de feed (TRADE/TICK/DEPTH/PROFILE/...) por la
+        /// conexion de datos. Lee la conexion UNA vez: la cuenta del feed puede
+        /// cambiar entre el chequeo y el envio (ver PromoteDataLink).</summary>
+        private void SendData(string line)
+        {
+            var c = DataConn;
+            if (c != null && c.IsLoggedIn) c.SendRaw(line);
+        }
 
         // Magic sintetico por estrategia. NT8 no tiene Magic Number: se asigna
         // la primera vez que una strategy llama CheckTrade con un tag nuevo.
@@ -97,10 +155,11 @@ namespace NinjaTrader.NinjaScript.AddOns
         private const int MagicRange = 90000;
 
         // magic -> ultimo instrumento operado con ese magic (para CMD_CLOSE y
-        // para resolver el magic de una posicion en STATE). Ver limitacion de
-        // netting en la cabecera del archivo.
-        private readonly ConcurrentDictionary<int, string> _magicToInstrument = new ConcurrentDictionary<int, string>();
-        private readonly ConcurrentDictionary<string, int> _instrumentToMagic = new ConcurrentDictionary<string, int>();
+        // para resolver el magic de una posicion en STATE): vive en AccountLink,
+        // POR CUENTA. NT8 netea por cuenta+instrumento, asi que el mismo
+        // instrumento en dos cuentas son dos posiciones distintas y compartir el
+        // mapa haria que un CMD_CLOSE cerrase en la cuenta equivocada. Ver
+        // limitacion de netting en la cabecera del archivo.
 
         // Bracket SL/TP pendiente por instancia Order. Order.OrderId MUTA al
         // aceptar el broker el submit (GUID interno -> id real): NUNCA usarlo
@@ -113,15 +172,9 @@ namespace NinjaTrader.NinjaScript.AddOns
             public int Qty;
             public double Sl, Tp;
         }
-        private readonly ConcurrentDictionary<Order, BracketInfo> _pendingBrackets = new ConcurrentDictionary<Order, BracketInfo>();
-
-        // Modo reactivo: cola de ordenes de terceros pendientes de gatear + set
-        // de las ya evaluadas (OnOrderUpdate dispara varias veces por orden).
-        // Worker propio para no bloquear el hilo de eventos de NT8 con el
-        // SendAndWait del socket.
-        private readonly BlockingCollection<Order> _reactiveQueue = new BlockingCollection<Order>(new ConcurrentQueue<Order>());
-        private readonly ConcurrentDictionary<Order, byte> _reactiveSeen = new ConcurrentDictionary<Order, byte>();
-        private Thread _reactiveThread;
+        // _pendingBrackets, la cola del modo reactivo y las conexiones de las
+        // strategies viven en AccountLink: todo eso termina en una orden sobre
+        // UNA cuenta concreta.
 
         // Streaming de ticks (CMD_STREAM 'Compartir local'): instrumentos cuyos
         // ticks se empujan al server (TICK|raiz|bid|ask|last) para que un EA/
@@ -195,8 +248,51 @@ namespace NinjaTrader.NinjaScript.AddOns
         // usan su PROPIA conexion (una por magic) porque el servidor identifica
         // al llamante por la conexion TCP (LOGIN fija el magic de ese socket),
         // igual que cada EA MT5 abre su propio socket.
-        private SocketConn _bridge;
-        private readonly ConcurrentDictionary<string, SocketConn> _strategyConns = new ConcurrentDictionary<string, SocketConn>();
+        // (una instancia de esto por cuenta: ver AccountLink)
+
+        /// <summary>Todo lo que es de UNA cuenta NinjaTrader.
+        ///
+        /// Un NinjaTrader tiene varias cuentas vivas a la vez y la app las trata
+        /// como terminales independientes ("NT8_&lt;Cuenta&gt;"). Cada una necesita su
+        /// propia conexion TCP porque el servidor identifica al terminal por la
+        /// conexion (el LOGIN fija terminal_id y magic de ese socket), igual que
+        /// cada EA MT5 abre la suya.</summary>
+        private class AccountLink
+        {
+            public string AccountName;
+            public string TerminalId;
+            public Account Account;
+            public SocketConn Conn;
+            public Thread BridgeThread;
+            // Este link concreto esta cerrado. NO vale mirar si su cuenta sigue en
+            // _links: una cuenta que se va y vuelve entre dos escaneos crea un link
+            // NUEVO con el mismo nombre, y el hilo del viejo seguiria vivo
+            // reconectando su socket — dos conexiones con el mismo terminal_id.
+            public volatile bool Stopped;
+
+            // Ver comentario de MagicBase: mapas POR CUENTA (netting por
+            // cuenta+instrumento).
+            public readonly ConcurrentDictionary<int, string> MagicToInstrument = new ConcurrentDictionary<int, string>();
+            public readonly ConcurrentDictionary<string, int> InstrumentToMagic = new ConcurrentDictionary<string, int>();
+            public readonly ConcurrentDictionary<Order, BracketInfo> PendingBrackets = new ConcurrentDictionary<Order, BracketInfo>();
+
+            // Modo reactivo: cola de ordenes de terceros pendientes de gatear +
+            // set de las ya evaluadas (OnOrderUpdate dispara varias veces por
+            // orden). Worker propio para no bloquear el hilo de eventos de NT8
+            // con el SendAndWait del socket.
+            public readonly BlockingCollection<Order> ReactiveQueue = new BlockingCollection<Order>(new ConcurrentQueue<Order>());
+            public readonly ConcurrentDictionary<Order, byte> ReactiveSeen = new ConcurrentDictionary<Order, byte>();
+            public Thread ReactiveThread;
+
+            // Conexion propia por strategy (el magic del socket lo fija el LOGIN).
+            public readonly ConcurrentDictionary<string, SocketConn> StrategyConns = new ConcurrentDictionary<string, SocketConn>();
+
+            // Delegados guardados para poder DESuscribir exactamente lo que se
+            // suscribio: los handlers llevan el link capturado, asi que "-=" con
+            // una lambda nueva no quitaria nada.
+            public EventHandler<OrderEventArgs> OrderHandler;
+            public EventHandler<ExecutionEventArgs> ExecutionHandler;
+        }
 
         protected override void OnStateChange()
         {
@@ -220,31 +316,18 @@ namespace NinjaTrader.NinjaScript.AddOns
 
         private void Start()
         {
-            _accountName = ResolveAccountName();
-            _terminalId = "NT8_" + _accountName;
             _running = true;
-            ResolveAccount();
-            AttachAccount();
-
-            _bridge = new SocketConn(ServerHost, ServerPort, _terminalId, _accountName, GetOrAssignMagic("__BRIDGE__"), OnPush, LogFunc);
-            // La app es la duena de que se comparte: al (re)conectar soltamos todo y
-            // esperamos a que nos lo vuelva a pedir (ver StopAllStreams).
-            _bridge.OnLoggedIn = StopAllStreams;
-            var t = new Thread(BridgeLoop) { IsBackground = true, Name = "AutomaticTradingNT8-Bridge" };
-            t.Start();
-
-            if (ReactiveMode)
-            {
-                _reactiveThread = new Thread(ReactiveLoop) { IsBackground = true, Name = "AutomaticTradingNT8-Reactive" };
-                _reactiveThread.Start();
-            }
-
+            SyncAccounts();     // alta inmediata de las cuentas que ya estan conectadas
+            _scanThread = new Thread(AccountScanLoop) { IsBackground = true, Name = "AutomaticTradingNT8-Scan" };
+            _scanThread.Start();
         }
 
         private void Stop()
         {
             _running = false;
-            DetachAccount();
+            foreach (var link in _links.Values.ToList()) StopLink(link);
+            _links.Clear();
+            _dataLink = null;
             foreach (var kv in _streamed)
             {
                 try { if (kv.Value != null) kv.Value.MarketData.Update -= OnMarketData; } catch { }
@@ -255,44 +338,164 @@ namespace NinjaTrader.NinjaScript.AddOns
                 try { if (kv.Value != null) kv.Value.MarketDepth.Update -= OnMarketDepth; } catch { }
             }
             _depthStreamed.Clear();
-            try { _reactiveQueue.CompleteAdding(); } catch { }
-            _bridge?.Close();
-            foreach (var c in _strategyConns.Values) c.Close();
-            _strategyConns.Clear();
         }
 
-        // Nombre de cuenta a usar: el configurado (AccountName) o, si esta vacio,
-        // la primera cuenta conectada (autodeteccion, punto 5 productizacion).
-        private string ResolveAccountName()
+        // ------------------------- altas y bajas de cuentas -------------------------
+
+        /// <summary>Cuentas que hay que puentear ahora mismo.
+        ///
+        /// AccountNames vacio = todas las conectadas. NinjaTrader conecta cuentas
+        /// cuando le da la gana (el usuario abre la conexion despues de arrancar),
+        /// asi que esto se re-evalua periodicamente en AccountScanLoop y no una
+        /// sola vez al arrancar.</summary>
+        private List<Account> WantedAccounts()
         {
-            if (!string.IsNullOrEmpty(AccountName)) return AccountName;
+            var wanted = new List<Account>();
+            var filter = (AccountNames ?? "").Split(',')
+                            .Select(s => s.Trim())
+                            .Where(s => s.Length > 0)
+                            .ToList();
             lock (Account.All)
             {
-                var a = Account.All.FirstOrDefault(x => x.Connection != null) ?? Account.All.FirstOrDefault();
-                return a != null ? a.Name : "Sim101";
+                foreach (var a in Account.All)
+                {
+                    if (a == null || string.IsNullOrEmpty(a.Name)) continue;
+                    if (filter.Count > 0)
+                    {
+                        if (!filter.Any(f => string.Equals(f, a.Name, StringComparison.OrdinalIgnoreCase))) continue;
+                    }
+                    else if (a.Connection == null) continue;   // sin filtro: solo las conectadas
+                    wanted.Add(a);
+                }
+            }
+            return wanted;
+        }
+
+        private void AccountScanLoop()
+        {
+            while (_running)
+            {
+                try { SyncAccounts(); }
+                catch (Exception ex) { Log("AutomaticTradingNT8: AccountScanLoop: " + ex.Message, LogLevel.Warning); }
+                Thread.Sleep(AccountScanMs);
             }
         }
 
-        private void ResolveAccount()
+        /// <summary>Pone los links al dia con las cuentas de NinjaTrader: da de alta
+        /// las nuevas y de baja las que ya no estan.</summary>
+        private void SyncAccounts()
         {
-            if (string.IsNullOrEmpty(_accountName)) _accountName = ResolveAccountName();
-            lock (Account.All)
-                _account = Account.All.FirstOrDefault(a => a.Name == _accountName);
-            if (_account == null)
-                Log("AutomaticTradingNT8: cuenta '" + _accountName + "' no encontrada todavia.", LogLevel.Warning);
+            var wanted = WantedAccounts();
+            var wantedNames = new HashSet<string>(wanted.Select(a => a.Name));
+
+            foreach (var acct in wanted)
+            {
+                if (_links.ContainsKey(acct.Name)) continue;
+                StartLink(acct);
+            }
+
+            foreach (var kv in _links.ToList())
+            {
+                if (wantedNames.Contains(kv.Key)) continue;
+                AccountLink gone;
+                if (_links.TryRemove(kv.Key, out gone))
+                {
+                    Log("AutomaticTradingNT8: cuenta '" + gone.AccountName +
+                        "' ya no esta disponible: puente cerrado.", LogLevel.Warning);
+                    StopLink(gone);
+                    if (_dataLink == gone) PromoteDataLink();
+                }
+            }
         }
 
-        private void AttachAccount()
+        private void StartLink(Account acct)
         {
-            if (_account == null) ResolveAccount();
-            if (_account == null) return;
+            var link = new AccountLink
+            {
+                AccountName = acct.Name,
+                TerminalId = "NT8_" + acct.Name,
+                Account = acct,
+            };
+            if (!_links.TryAdd(acct.Name, link)) return;
+
+            link.Conn = new SocketConn(ServerHost, ServerPort, link.TerminalId, link.AccountName,
+                                       GetOrAssignMagic("__BRIDGE__"), s => OnPush(link, s), LogFunc);
+
+            // El feed lo sirve UNA cuenta (ver cabecera). La primera que arranca.
+            if (_dataLink == null)
+            {
+                _dataLink = link;
+                // La app es la duena de que se comparte: al (re)conectar soltamos
+                // todo y esperamos a que nos lo vuelva a pedir (ver StopAllStreams).
+                // Solo en la cuenta del feed: la reconexion de OTRA cuenta no debe
+                // tirar las suscripciones de mercado.
+                link.Conn.OnLoggedIn = StopAllStreams;
+            }
+
+            AttachAccount(link);
+
+            link.BridgeThread = new Thread(() => BridgeLoop(link))
+            {
+                IsBackground = true,
+                Name = "AutomaticTradingNT8-Bridge-" + link.AccountName,
+            };
+            link.BridgeThread.Start();
+
+            if (ReactiveMode)
+            {
+                link.ReactiveThread = new Thread(() => ReactiveLoop(link))
+                {
+                    IsBackground = true,
+                    Name = "AutomaticTradingNT8-Reactive-" + link.AccountName,
+                };
+                link.ReactiveThread.Start();
+            }
+
+            Log("AutomaticTradingNT8: puenteando cuenta '" + link.AccountName + "' como " + link.TerminalId +
+                (_dataLink == link ? " (sirve tambien el feed de mercado)." : "."), LogLevel.Information);
+        }
+
+        private void StopLink(AccountLink link)
+        {
+            if (link == null) return;
+            link.Stopped = true;
+            DetachAccount(link);
+            try { link.ReactiveQueue.CompleteAdding(); } catch { }
+            if (link.Conn != null) link.Conn.Close();
+            foreach (var c in link.StrategyConns.Values) c.Close();
+            link.StrategyConns.Clear();
+        }
+
+        /// <summary>La cuenta que servia el feed se fue: se asciende otra.
+        ///
+        /// Las suscripciones vivas apuntaban a un socket cerrado, asi que se sueltan
+        /// y se avisa: la app las vuelve a pedir en la siguiente reconexion de la
+        /// cuenta que ahora sirve el feed.</summary>
+        private void PromoteDataLink()
+        {
+            var next = _links.Values.FirstOrDefault();
+            _dataLink = next;
+            StopAllStreams();
+            if (next != null)
+            {
+                next.Conn.OnLoggedIn = StopAllStreams;
+                Log("AutomaticTradingNT8: el feed de mercado pasa a la cuenta '" + next.AccountName +
+                    "'. Si estabas compartiendo instrumentos, vuelve a activarlos en la app.", LogLevel.Warning);
+            }
+        }
+
+        private void AttachAccount(AccountLink link)
+        {
+            if (link == null || link.Account == null) return;
             try
             {
-                _account.OrderUpdate += OnOrderUpdate;
-                _account.ExecutionUpdate += OnExecutionUpdate;
-                RebuildMagicMapFromOrders();
+                link.OrderHandler = (s, e) => OnOrderUpdate(link, e);
+                link.ExecutionHandler = (s, e) => OnExecutionUpdate(link, e);
+                link.Account.OrderUpdate += link.OrderHandler;
+                link.Account.ExecutionUpdate += link.ExecutionHandler;
+                RebuildMagicMapFromOrders(link);
             }
-            catch (Exception ex) { Log("AutomaticTradingNT8: error suscribiendo cuenta: " + ex.Message, LogLevel.Error); }
+            catch (Exception ex) { Log("AutomaticTradingNT8: error suscribiendo cuenta '" + link.AccountName + "': " + ex.Message, LogLevel.Error); }
         }
 
         /// <summary>Reconstruye magic &lt;-&gt; instrumento leyendo las ordenes de la cuenta.
@@ -304,13 +507,13 @@ namespace NinjaTrader.NinjaScript.AddOns
         /// Las ordenes que coloca el puente llevan el tag "ATP_&lt;magic&gt;", asi que la
         /// asociacion se recupera de la propia cuenta, sin persistir nada.
         /// </summary>
-        private void RebuildMagicMapFromOrders()
+        private void RebuildMagicMapFromOrders(AccountLink link)
         {
-            if (_account == null) return;
+            if (link == null || link.Account == null) return;
             int restored = 0;
             try
             {
-                foreach (var o in _account.Orders.ToList())
+                foreach (var o in link.Account.Orders.ToList())
                 {
                     if (o == null || o.Instrument == null) continue;
                     string nm = o.Name ?? "";
@@ -323,64 +526,67 @@ namespace NinjaTrader.NinjaScript.AddOns
 
                     CacheInstrument(o.Instrument);
                     string root = RootSymbol(o.Instrument);
-                    _magicToInstrument[magic] = root;
-                    _instrumentToMagic[root] = magic;
+                    link.MagicToInstrument[magic] = root;
+                    link.InstrumentToMagic[root] = magic;
                     restored++;
                 }
             }
             catch (Exception ex) { Log("AutomaticTradingNT8: RebuildMagicMapFromOrders: " + ex.Message, LogLevel.Warning); }
 
             if (restored > 0)
-                Log("AutomaticTradingNT8: recuperadas " + restored + " asociaciones magic->instrumento de las ordenes de la cuenta.", LogLevel.Information);
+                Log("AutomaticTradingNT8: recuperadas " + restored + " asociaciones magic->instrumento de las ordenes de '" +
+                    link.AccountName + "'.", LogLevel.Information);
         }
 
-        private void DetachAccount()
+        private void DetachAccount(AccountLink link)
         {
-            if (_account == null) return;
-            try { _account.OrderUpdate -= OnOrderUpdate; } catch { }
-            try { _account.ExecutionUpdate -= OnExecutionUpdate; } catch { }
+            if (link == null || link.Account == null) return;
+            try { if (link.OrderHandler != null) link.Account.OrderUpdate -= link.OrderHandler; } catch { }
+            try { if (link.ExecutionHandler != null) link.Account.ExecutionUpdate -= link.ExecutionHandler; } catch { }
         }
 
         // Bucle dueño de la conexion "bridge": conecta con backoff, y mientras
         // esta conectada manda PING+STATE periodicos. Un socket muerto NO debe
         // bloquear reintentos (gotcha guia #4.5).
-        private void BridgeLoop()
+        private void BridgeLoop(AccountLink link)
         {
             int failCount = 0;
-            while (_running)
+            while (_running && !link.Stopped)
             {
-                if (!_bridge.IsLoggedIn)
+                if (!link.Conn.IsLoggedIn)
                 {
-                    if (_bridge.Connect())
+                    if (link.Conn.Connect())
                     {
                         failCount = 0;
-                        Log("AutomaticTradingNT8: bridge conectado (" + _terminalId + ").", LogLevel.Information);
+                        Log("AutomaticTradingNT8: bridge conectado (" + link.TerminalId + ").", LogLevel.Information);
                     }
                     else
                     {
                         failCount++;
                         int waitSec = Math.Min(60, 5 * failCount);
                         if (failCount == 1 || failCount % 5 == 0)
-                            Log("AutomaticTradingNT8: fallo conexion bridge (" + failCount + "). Reintento en " + waitSec + "s.", LogLevel.Warning);
+                            Log("AutomaticTradingNT8: fallo conexion bridge de " + link.TerminalId +
+                                " (" + failCount + "). Reintento en " + waitSec + "s.", LogLevel.Warning);
                         Thread.Sleep(waitSec * 1000);
                         continue;
                     }
                 }
 
                 Thread.Sleep(Math.Min(PingPeriodMs, StatePeriodMs));
-                if (_bridge.IsLoggedIn)
+                if (link.Conn.IsLoggedIn)
                 {
-                    _bridge.SendRaw("PING");
-                    SendState();
+                    link.Conn.SendRaw("PING");
+                    SendState(link);
                 }
             }
         }
 
         // Mensajes que llegan por push (no son respuesta a un SendAndWait):
-        // hoy solo CMD_OPEN/CMD_CLOSE/CMD_UPDATE_SLTP.
-        private void OnPush(string line)
+        // CMD_OPEN/CMD_CLOSE/CMD_UPDATE_SLTP y los comandos de feed. `link` es la
+        // cuenta por cuya conexion entro el comando.
+        private void OnPush(AccountLink link, string line)
         {
-            try { HandleCommand(line); }
+            try { HandleCommand(link, line); }
             catch (Exception ex) { Log("AutomaticTradingNT8: HandleCommand '" + line + "': " + ex.Message, LogLevel.Error); }
         }
 
@@ -395,19 +601,26 @@ namespace NinjaTrader.NinjaScript.AddOns
         /// Gate de riesgo antes de abrir. type: 0=Buy, 1=Sell. barTime: NT8 no tiene
         /// iTime() como MT5; pasar Time[0].Ticks o ToTime(Time[0]) desde la strategy.
         /// priority: 0 = no ocupa el semaforo de turnos (igual que PreOpenCheck en MT5).
+        ///
+        /// accountName: cuenta sobre la que opera la strategy. PASARLO SIEMPRE
+        /// (`Account.Name` dentro de una Strategy). Con varias cuentas puenteadas,
+        /// omitirlo gatea contra la cuenta del feed, y los limites (DD, lotes,
+        /// margen) de ESA cuenta no son los de la que va a recibir la orden.
+        /// El parametro es opcional solo para no romper las strategies ya escritas.
         /// </summary>
-        public static bool CheckTrade(string strategyTag, double lots, int type, long barTime, int priority, out int magic, out string reason)
+        public static bool CheckTrade(string strategyTag, double lots, int type, long barTime, int priority, out int magic, out string reason, string accountName = null)
         {
             magic = 0;
             reason = "";
             var inst = _instance;
             if (inst == null) { reason = "bridge_not_loaded"; return true; } // fail-open: AddOn no cargado
-            return inst.CheckTradeInternal(strategyTag, lots, type, barTime, priority, out magic, out reason);
+            return inst.CheckTradeInternal(strategyTag, lots, type, barTime, priority, accountName, out magic, out reason);
         }
 
-        public static void Release(string strategyTag)
+        public static void Release(string strategyTag, string accountName = null)
         {
-            _instance?.ReleaseInternal(strategyTag);
+            var inst = _instance;
+            if (inst != null) inst.ReleaseInternal(strategyTag, accountName);
         }
 
         /// <summary>Nombre/señal de entrada a usar en EnterLong/EnterShort para que STATE
@@ -417,15 +630,29 @@ namespace NinjaTrader.NinjaScript.AddOns
             return "ATP_" + magic;
         }
 
-        private bool CheckTradeInternal(string strategyTag, double lots, int type, long barTime, int priority, out int magic, out string reason)
+        /// <summary>Link de la cuenta pedida; si no se pide ninguna (o no esta
+        /// puenteada), el del feed. Puede ser null si aun no hay ninguna cuenta.</summary>
+        private AccountLink LinkFor(string accountName)
+        {
+            AccountLink link;
+            if (!string.IsNullOrEmpty(accountName) && _links.TryGetValue(accountName, out link))
+                return link;
+            return _dataLink;
+        }
+
+        private bool CheckTradeInternal(string strategyTag, double lots, int type, long barTime, int priority, string accountName, out int magic, out string reason)
         {
             reason = "";
             int magicLocal = GetOrAssignMagic(strategyTag);
             magic = magicLocal;
+
+            var link = LinkFor(accountName);
+            if (link == null) { reason = "no_account"; return true; }  // fail-open: sin puente, como si el AddOn no estuviera
+
             // magicLocal (no el parametro `out magic`) porque C# prohibe capturar
             // parametros ref/out en una lambda (CS1628).
-            var conn = _strategyConns.GetOrAdd(strategyTag, _ =>
-                new SocketConn(ServerHost, ServerPort, _terminalId, _accountName, magicLocal, OnPush, LogFunc));
+            var conn = link.StrategyConns.GetOrAdd(strategyTag, _ =>
+                new SocketConn(ServerHost, ServerPort, link.TerminalId, link.AccountName, magicLocal, s => OnPush(link, s), LogFunc));
 
             if (!conn.IsLoggedIn && !conn.Connect())
             {
@@ -437,18 +664,20 @@ namespace NinjaTrader.NinjaScript.AddOns
             string response = conn.SendAndWait(msg, CheckTradeTimeoutMs);
             if (response.StartsWith("ALLOW", StringComparison.Ordinal))
             {
-                _instrumentToMagic[strategyTag] = magic; // best-effort, se refina en OnExecutionUpdate
+                link.InstrumentToMagic[strategyTag] = magic; // best-effort, se refina en OnExecutionUpdate
                 return true;
             }
             reason = response;
             return false;
         }
 
-        private void ReleaseInternal(string strategyTag)
+        private void ReleaseInternal(string strategyTag, string accountName)
         {
+            var link = LinkFor(accountName);
+            if (link == null) return;
             int magic = GetOrAssignMagic(strategyTag);
             SocketConn conn;
-            if (_strategyConns.TryGetValue(strategyTag, out conn) && conn.IsLoggedIn)
+            if (link.StrategyConns.TryGetValue(strategyTag, out conn) && conn.IsLoggedIn)
                 conn.SendRaw("RELEASE|" + magic);
         }
 
@@ -468,15 +697,15 @@ namespace NinjaTrader.NinjaScript.AddOns
 
         // ------------------------- STATE -------------------------
 
-        private void SendState()
+        private void SendState(AccountLink link)
         {
-            if (_account == null) { ResolveAccount(); if (_account == null) return; }
+            if (link == null || link.Account == null) return;
             try
             {
-                double balance = SafeGet(AccountItem.CashValue);
-                double equity = balance + SafeGet(AccountItem.UnrealizedProfitLoss);
-                double margin = SafeGet(AccountItem.InitialMargin);
-                double buyingPower = SafeGet(AccountItem.BuyingPower);
+                double balance = SafeGet(link, AccountItem.CashValue);
+                double equity = balance + SafeGet(link, AccountItem.UnrealizedProfitLoss);
+                double margin = SafeGet(link, AccountItem.InitialMargin);
+                double buyingPower = SafeGet(link, AccountItem.BuyingPower);
                 double marginLevel = margin > 0 ? (equity / margin) * 100.0 : 0.0;
 
                 var sb = new StringBuilder();
@@ -484,7 +713,7 @@ namespace NinjaTrader.NinjaScript.AddOns
                   .Append(Num(margin)).Append('|').Append(Num(marginLevel)).Append('|');
 
                 bool first = true;
-                foreach (var p in _account.Positions.Where(p => p.MarketPosition != MarketPosition.Flat))
+                foreach (var p in link.Account.Positions.Where(p => p.MarketPosition != MarketPosition.Flat))
                 {
                     if (!first) sb.Append(';');
                     first = false;
@@ -494,7 +723,7 @@ namespace NinjaTrader.NinjaScript.AddOns
                     CacheInstrument(p.Instrument);
                     string instrKey = RootSymbol(p.Instrument);
                     int magic;
-                    if (!_instrumentToMagic.TryGetValue(instrKey, out magic)) magic = 0;
+                    if (!link.InstrumentToMagic.TryGetValue(instrKey, out magic)) magic = 0;
                     // "ticket" sintetico: NT8 netea por instrumento, no hay id de posicion
                     // estable como el ticket de MT5. Determinista para un mismo
                     // (instrumento, magic) — ver limitacion de netting en la cabecera.
@@ -514,14 +743,14 @@ namespace NinjaTrader.NinjaScript.AddOns
                       .Append("0:0:").Append(Num(unrealized)).Append(':').Append(magic);
                 }
 
-                _bridge.SendRaw(sb.ToString());
+                link.Conn.SendRaw(sb.ToString());
             }
-            catch (Exception ex) { Log("AutomaticTradingNT8: error enviando STATE: " + ex.Message, LogLevel.Warning); }
+            catch (Exception ex) { Log("AutomaticTradingNT8: error enviando STATE de " + link.AccountName + ": " + ex.Message, LogLevel.Warning); }
         }
 
-        private double SafeGet(AccountItem item)
+        private double SafeGet(AccountLink link, AccountItem item)
         {
-            try { return _account.Get(item, Currency.UsDollar); } catch { return 0.0; }
+            try { return link.Account.Get(item, Currency.UsDollar); } catch { return 0.0; }
         }
 
         // ------------------------- eventos de cuenta -------------------------
@@ -530,7 +759,7 @@ namespace NinjaTrader.NinjaScript.AddOns
         // NUNCA en OnExecutionUpdate: la ejecucion puede llegar ANTES de que el
         // estado pase a Filled, y el chequeo fallaria en silencio (gotcha real,
         // dejo posiciones reales sin SL/TP en el proyecto hermano DMRI).
-        private void OnOrderUpdate(object sender, OrderEventArgs e)
+        private void OnOrderUpdate(AccountLink link, OrderEventArgs e)
         {
             try
             {
@@ -546,40 +775,40 @@ namespace NinjaTrader.NinjaScript.AddOns
                     if (!nm.StartsWith("ATP_", StringComparison.Ordinal) &&
                         (e.OrderState == OrderState.Accepted || e.OrderState == OrderState.Working ||
                          e.OrderState == OrderState.Submitted || e.OrderState == OrderState.Filled) &&
-                        _reactiveSeen.TryAdd(e.Order, 1))
+                        link.ReactiveSeen.TryAdd(e.Order, 1))
                     {
-                        try { _reactiveQueue.Add(e.Order); } catch { }
+                        try { link.ReactiveQueue.Add(e.Order); } catch { }
                     }
                 }
 
                 if (e.OrderState != OrderState.Filled) return;
 
                 BracketInfo bi;
-                if (_pendingBrackets.TryRemove(e.Order, out bi))
-                    PlaceBracket(bi);
+                if (link.PendingBrackets.TryRemove(e.Order, out bi))
+                    PlaceBracket(link, bi);
             }
             catch (Exception ex) { Log("AutomaticTradingNT8: OnOrderUpdate: " + ex.Message, LogLevel.Error); }
         }
 
         // ------------------------- modo reactivo (estrategias de terceros) -------------------------
 
-        private void ReactiveLoop()
+        private void ReactiveLoop(AccountLink link)
         {
             try
             {
-                foreach (var order in _reactiveQueue.GetConsumingEnumerable())
+                foreach (var order in link.ReactiveQueue.GetConsumingEnumerable())
                 {
-                    try { ReactiveGate(order); }
+                    try { ReactiveGate(link, order); }
                     catch (Exception ex) { Log("AutomaticTradingNT8: ReactiveGate: " + ex.Message, LogLevel.Error); }
                 }
             }
             catch (Exception ex) { if (_running) Log("AutomaticTradingNT8: ReactiveLoop: " + ex.Message, LogLevel.Warning); }
         }
 
-        private void ReactiveGate(Order o)
+        private void ReactiveGate(AccountLink link, Order o)
         {
-            if (!IsEntryOrder(o)) return;   // cierres/reducciones: siempre permitidos
-            if (_account == null) return;
+            if (link.Account == null) return;
+            if (!IsEntryOrder(link, o)) return;   // cierres/reducciones: siempre permitidos
 
             int type = o.OrderAction == OrderAction.SellShort ? 1 : 0;
             double lots = o.Quantity;
@@ -589,29 +818,30 @@ namespace NinjaTrader.NinjaScript.AddOns
             // globales + limites (DD/lotes/margen/emergencia/deshabilitado),
             // igual que el PreOpenCheck del EA MT5.
             string resp = "ALLOW";
-            if (_bridge != null && _bridge.IsLoggedIn)
+            if (link.Conn != null && link.Conn.IsLoggedIn)
             {
                 string msg = string.Format(CultureInfo.InvariantCulture, "CHECK_TRADE|{0}|{1:F2}|{2}|0", type, lots, barTime);
-                resp = _bridge.SendAndWait(msg, CheckTradeTimeoutMs);
+                resp = link.Conn.SendAndWait(msg, CheckTradeTimeoutMs);
             }
 
             if (resp.StartsWith("ALLOW", StringComparison.Ordinal)) return;
 
-            Log("AutomaticTradingNT8: REACTIVO DENY -> cancelar/cerrar " + o.Instrument.FullName + " (" + resp + ")", LogLevel.Warning);
-            CancelOrFlatten(o);
+            Log("AutomaticTradingNT8: REACTIVO DENY (" + link.AccountName + ") -> cancelar/cerrar " +
+                o.Instrument.FullName + " (" + resp + ")", LogLevel.Warning);
+            CancelOrFlatten(link, o);
         }
 
         // Entrada = abre o aumenta posicion. Cierre/reduccion = permitir siempre.
-        private bool IsEntryOrder(Order o)
+        private bool IsEntryOrder(AccountLink link, Order o)
         {
-            var pos = _account.Positions.FirstOrDefault(p => p.Instrument == o.Instrument);
+            var pos = link.Account.Positions.FirstOrDefault(p => p.Instrument == o.Instrument);
             var mp = pos != null ? pos.MarketPosition : MarketPosition.Flat;
             if (o.OrderAction == OrderAction.Buy) return mp != MarketPosition.Short;       // abre/aumenta long (no cierra un short)
             if (o.OrderAction == OrderAction.SellShort) return mp != MarketPosition.Long;  // abre/aumenta short
             return false; // Sell, BuyToCover = cierres
         }
 
-        private void CancelOrFlatten(Order o)
+        private void CancelOrFlatten(AccountLink link, Order o)
         {
             try
             {
@@ -619,25 +849,25 @@ namespace NinjaTrader.NinjaScript.AddOns
                 if (o.OrderState == OrderState.Working || o.OrderState == OrderState.Accepted ||
                     o.OrderState == OrderState.Submitted)
                 {
-                    _account.Cancel(new[] { o });
+                    link.Account.Cancel(new[] { o });
                 }
                 // 2) Si ya habia posicion (o lleno mientras ibamos), aplanarla.
                 //    NT8 netea por instrumento: esto cierra TODA la posicion del
                 //    instrumento (ver limitacion de netting en la cabecera).
-                var pos = _account.Positions.FirstOrDefault(p => p.Instrument == o.Instrument && p.MarketPosition != MarketPosition.Flat);
+                var pos = link.Account.Positions.FirstOrDefault(p => p.Instrument == o.Instrument && p.MarketPosition != MarketPosition.Flat);
                 if (pos != null)
                 {
                     var action = pos.MarketPosition == MarketPosition.Long ? OrderAction.Sell : OrderAction.BuyToCover;
-                    var close = _account.CreateOrder(pos.Instrument, action, OrderType.Market, OrderEntry.Automated,
+                    var close = link.Account.CreateOrder(pos.Instrument, action, OrderType.Market, OrderEntry.Automated,
                         TimeInForce.Gtc, Math.Abs(pos.Quantity), 0, 0, string.Empty, "ATP_reactive_close",
                         Core.Globals.MaxDate, null);
-                    _account.Submit(new[] { close });
+                    link.Account.Submit(new[] { close });
                 }
             }
             catch (Exception ex) { Log("AutomaticTradingNT8: CancelOrFlatten: " + ex.Message, LogLevel.Warning); }
         }
 
-        private void OnExecutionUpdate(object sender, ExecutionEventArgs e)
+        private void OnExecutionUpdate(AccountLink link, ExecutionEventArgs e)
         {
             try
             {
@@ -650,30 +880,30 @@ namespace NinjaTrader.NinjaScript.AddOns
                     {
                         CacheInstrument(e.Execution.Instrument);
                         string instrKey = RootSymbol(e.Execution.Instrument);
-                        _magicToInstrument[magic] = instrKey;
-                        _instrumentToMagic[instrKey] = magic;
+                        link.MagicToInstrument[magic] = instrKey;
+                        link.InstrumentToMagic[instrKey] = magic;
                     }
                 }
             }
             catch (Exception ex) { Log("AutomaticTradingNT8: OnExecutionUpdate: " + ex.Message, LogLevel.Error); }
         }
 
-        private void PlaceBracket(BracketInfo b)
+        private void PlaceBracket(AccountLink link, BracketInfo b)
         {
-            if (_account == null) return;
+            if (link == null || link.Account == null) return;
             try
             {
                 string oco = "ATP_OCO_" + Guid.NewGuid().ToString("N").Substring(0, 8);
                 var children = new System.Collections.Generic.List<Order>();
                 if (b.Sl > 0)
-                    children.Add(_account.CreateOrder(b.Instrument, b.ExitAction, OrderType.StopMarket,
+                    children.Add(link.Account.CreateOrder(b.Instrument, b.ExitAction, OrderType.StopMarket,
                         OrderEntry.Automated, TimeInForce.Gtc, b.Qty, 0, b.Sl, oco, "ATP_bracket",
                         Core.Globals.MaxDate, null));
                 if (b.Tp > 0)
-                    children.Add(_account.CreateOrder(b.Instrument, b.ExitAction, OrderType.Limit,
+                    children.Add(link.Account.CreateOrder(b.Instrument, b.ExitAction, OrderType.Limit,
                         OrderEntry.Automated, TimeInForce.Gtc, b.Qty, b.Tp, 0, oco, "ATP_bracket",
                         Core.Globals.MaxDate, null));
-                if (children.Count > 0) _account.Submit(children.ToArray());
+                if (children.Count > 0) link.Account.Submit(children.ToArray());
             }
             catch (Exception ex) { Log("AutomaticTradingNT8: PlaceBracket: " + ex.Message, LogLevel.Warning); }
         }
@@ -682,7 +912,11 @@ namespace NinjaTrader.NinjaScript.AddOns
         // Destino de copia de señales MT5->NT8: server->NT8, ejecutado por el AddOn
         // directamente sobre la cuenta (no requiere ninguna Strategy activa).
 
-        private void HandleCommand(string line)
+        // Los CMD_ de cuenta (OPEN/CLOSE/UPDATE_SLTP/FLATTEN) actuan sobre `link`,
+        // la cuenta por cuya conexion llegaron. Los de mercado (STREAM/HISTORY/
+        // PROFILE/DEPTH) no son de ninguna cuenta: se atienden una sola vez y su
+        // respuesta sale por DataConn (ver cabecera del archivo).
+        private void HandleCommand(AccountLink link, string line)
         {
             var parts = line.Split('|');
             string cmd = parts[0];
@@ -695,12 +929,12 @@ namespace NinjaTrader.NinjaScript.AddOns
                 double sl = ParseD(parts[4]);
                 double tp = ParseD(parts[5]);
                 int magic = (int)ParseD(parts[6]);
-                ExecuteOpen(symbol, type, volume, sl, tp, magic);
+                ExecuteOpen(link, symbol, type, volume, sl, tp, magic);
             }
             else if (cmd == "CMD_CLOSE" && parts.Length >= 2)
             {
                 int magic = (int)ParseD(parts[1]);
-                ExecuteClose(magic);
+                ExecuteClose(link, magic);
             }
             else if (cmd == "CMD_UPDATE_SLTP" && parts.Length >= 4)
             {
@@ -711,7 +945,7 @@ namespace NinjaTrader.NinjaScript.AddOns
             }
             else if (cmd == "CMD_FLATTEN")
             {
-                FlattenAll();
+                FlattenAll(link);
             }
             else if (cmd == "CMD_STREAM" && parts.Length >= 2)
             {
@@ -912,7 +1146,7 @@ namespace NinjaTrader.NinjaScript.AddOns
 
                         for (int i = first; i < n; i++)
                         {
-                            if (!_running || _bridge == null || !_bridge.IsLoggedIn) break;
+                            if (!_running || !DataReady) break;
 
                             long   tms   = new DateTimeOffset(bars.GetTime(i).ToUniversalTime()).ToUnixTimeMilliseconds();
                             double price = bars.GetClose(i);
@@ -929,7 +1163,7 @@ namespace NinjaTrader.NinjaScript.AddOns
                             if (ask > 0 && price >= ask) side = 1;
                             else if (bid > 0 && price <= bid) side = -1;
 
-                            _bridge.SendRaw("TRADE|" + root + "|" + tms + "|" + Num(price) + "|" +
+                            SendData("TRADE|" + root + "|" + tms + "|" + Num(price) + "|" +
                                             Num(vol) + "|" + Num(bid) + "|" + Num(ask) + "|" + side);
                             lastTs = tms;
                             sent++;
@@ -952,8 +1186,7 @@ namespace NinjaTrader.NinjaScript.AddOns
                         // pidio, cosa que pasa SIEMPRE en los primeros segundos: NT8 tarda
                         // ~1 min en servir el BarsRequest, asi que el EA haria el backfill
                         // con los cuatro trades en vivo que hubiera y no lo repetiria.
-                        if (_bridge != null && _bridge.IsLoggedIn)
-                            _bridge.SendRaw("HISTORY_DONE|" + root);
+                        SendData("HISTORY_DONE|" + root);
                     }
                 });
             }
@@ -961,8 +1194,7 @@ namespace NinjaTrader.NinjaScript.AddOns
             {
                 Log("AutomaticTradingNT8: historico de operaciones: " + ex.Message, LogLevel.Warning);
                 FlushLiveQueue(root, 0);
-                if (_bridge != null && _bridge.IsLoggedIn)
-                    _bridge.SendRaw("HISTORY_DONE|" + root);   // fallo: que el EA no espere para siempre
+                SendData("HISTORY_DONE|" + root);   // fallo: que el EA no espere para siempre
             }
         }
 
@@ -978,7 +1210,7 @@ namespace NinjaTrader.NinjaScript.AddOns
             while (q.TryDequeue(out item))
             {
                 if (item.Key <= histLastTs) { dup++; continue; }
-                if (_bridge != null && _bridge.IsLoggedIn) _bridge.SendRaw(item.Value);
+                SendData(item.Value);
                 sent++;
             }
             if (sent > 0 || dup > 0)
@@ -1144,7 +1376,7 @@ namespace NinjaTrader.NinjaScript.AddOns
 
             for (int i = 0; i < n; i++)
             {
-                if (!_running || _bridge == null || !_bridge.IsLoggedIn) break;
+                if (!_running || !DataReady) break;
 
                 // NT8 fecha la vela por su CIERRE. Se resta 1 ms para que un minuto
                 // que termina justo en una frontera caiga en la vela que lo contiene
@@ -1199,7 +1431,7 @@ namespace NinjaTrader.NinjaScript.AddOns
                 first = false;
                 sb.Append(Num(kv.Key)).Append(':').Append(kv.Value[0]).Append(':').Append(kv.Value[1]);
             }
-            _bridge.SendRaw(sb.ToString());
+            SendData(sb.ToString());
 
             // Misma cortesia que el volcado de ticks: una escalera D1 son ~48 KB y
             // varias seguidas dejan a NT8 sin responder mientras escribe el socket.
@@ -1209,8 +1441,7 @@ namespace NinjaTrader.NinjaScript.AddOns
 
         private void SendProfileDone(string root, int nBars)
         {
-            if (_bridge != null && _bridge.IsLoggedIn)
-                _bridge.SendRaw("PROFILE_DONE|" + root + "|" + nBars);
+            SendData("PROFILE_DONE|" + root + "|" + nBars);
         }
 
         // ------------------------- streaming de ticks (Compartir local) -------------------------
@@ -1297,7 +1528,7 @@ namespace NinjaTrader.NinjaScript.AddOns
             try
             {
                 if (e == null || e.Instrument == null) return;
-                if (_bridge == null || !_bridge.IsLoggedIn) return;
+                if (!DataReady) return;
 
                 string root = RootSymbol(e.Instrument);
                 var md = e.Instrument.MarketData;
@@ -1339,7 +1570,7 @@ namespace NinjaTrader.NinjaScript.AddOns
                         return;
                     }
 
-                    _bridge.SendRaw(trade);
+                    SendData(trade);
 
                     long sent = _tradesSent.AddOrUpdate(root, 1, (k, v) => v + 1);
                     if (sent == 1 || sent % 500 == 0)
@@ -1359,7 +1590,7 @@ namespace NinjaTrader.NinjaScript.AddOns
 
                 double lastPx = md != null && md.Last != null ? md.Last.Price : 0;
                 long epoch = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
-                _bridge.SendRaw("TICK|" + root + "|" + Num(bid) + "|" + Num(ask) + "|" + Num(lastPx) + "|" + epoch);
+                SendData("TICK|" + root + "|" + Num(bid) + "|" + Num(ask) + "|" + Num(lastPx) + "|" + epoch);
             }
             catch (Exception ex) { Log("AutomaticTradingNT8: OnMarketData: " + ex.Message, LogLevel.Warning); }
         }
@@ -1438,8 +1669,7 @@ namespace NinjaTrader.NinjaScript.AddOns
                         .Select(r => Num(r.Price) + ":" + r.Volume));
                 }
 
-                if (_bridge != null && _bridge.IsLoggedIn)
-                    _bridge.SendRaw("DEPTH|" + root + "|" + bidsCsv + "|" + asksCsv);
+                SendData("DEPTH|" + root + "|" + bidsCsv + "|" + asksCsv);
             }
             catch (Exception ex) { Log("AutomaticTradingNT8: OnMarketDepth: " + ex.Message, LogLevel.Warning); }
         }
@@ -1447,42 +1677,42 @@ namespace NinjaTrader.NinjaScript.AddOns
         // Aplana TODAS las posiciones de la cuenta (parada de emergencia /
         // cerrar todas desde la app). Incluye las ATP_ propias: la emergencia
         // debe cerrar TODO, sin excepciones.
-        private void FlattenAll()
+        private void FlattenAll(AccountLink link)
         {
-            if (_account == null) { ResolveAccount(); if (_account == null) return; }
+            if (link == null || link.Account == null) return;
             try
             {
                 // 1) Cancelar PRIMERO las ordenes de trabajo (brackets SL/TP,
                 //    pendientes). Debe ir ANTES de crear el flatten: si se hace
                 //    despues, la propia orden de cierre (que pasa por Working)
                 //    se cancelaria a si misma (bug: la posicion no se cerraba).
-                var working = _account.Orders.Where(o => o.OrderState == OrderState.Working ||
+                var working = link.Account.Orders.Where(o => o.OrderState == OrderState.Working ||
                     o.OrderState == OrderState.Accepted || o.OrderState == OrderState.Submitted).ToList();
-                if (working.Count > 0) _account.Cancel(working.ToArray());
+                if (working.Count > 0) link.Account.Cancel(working.ToArray());
 
                 // 2) Aplanar todas las posiciones abiertas con market opuesta.
-                var open = _account.Positions.Where(p => p.MarketPosition != MarketPosition.Flat).ToList();
+                var open = link.Account.Positions.Where(p => p.MarketPosition != MarketPosition.Flat).ToList();
                 if (open.Count == 0)
                 {
-                    Log("AutomaticTradingNT8: CMD_FLATTEN — no hay posiciones abiertas.", LogLevel.Information);
+                    Log("AutomaticTradingNT8: CMD_FLATTEN (" + link.AccountName + ") — no hay posiciones abiertas.", LogLevel.Information);
                     return;
                 }
                 foreach (var pos in open)
                 {
                     var action = pos.MarketPosition == MarketPosition.Long ? OrderAction.Sell : OrderAction.BuyToCover;
-                    var close = _account.CreateOrder(pos.Instrument, action, OrderType.Market, OrderEntry.Automated,
+                    var close = link.Account.CreateOrder(pos.Instrument, action, OrderType.Market, OrderEntry.Automated,
                         TimeInForce.Gtc, Math.Abs(pos.Quantity), 0, 0, string.Empty, "ATP_flatten",
                         Core.Globals.MaxDate, null);
-                    _account.Submit(new[] { close });
+                    link.Account.Submit(new[] { close });
                 }
-                Log("AutomaticTradingNT8: CMD_FLATTEN — cerradas " + open.Count + " posiciones.", LogLevel.Warning);
+                Log("AutomaticTradingNT8: CMD_FLATTEN (" + link.AccountName + ") — cerradas " + open.Count + " posiciones.", LogLevel.Warning);
             }
             catch (Exception ex) { Log("AutomaticTradingNT8: FlattenAll: " + ex.Message, LogLevel.Error); }
         }
 
-        private void ExecuteOpen(string symbol, int type, double volume, double sl, double tp, int magic)
+        private void ExecuteOpen(AccountLink link, string symbol, int type, double volume, double sl, double tp, int magic)
         {
-            if (_account == null) { ResolveAccount(); if (_account == null) { Log("AutomaticTradingNT8: CMD_OPEN sin cuenta.", LogLevel.Warning); return; } }
+            if (link == null || link.Account == null) { Log("AutomaticTradingNT8: CMD_OPEN sin cuenta.", LogLevel.Warning); return; }
             // symbol puede venir como raiz ("MNQ") o contrato completo: ResolveInstrument
             // devuelve el frontal para la raiz.
             var instrument = ResolveInstrument(symbol);
@@ -1492,12 +1722,12 @@ namespace NinjaTrader.NinjaScript.AddOns
             OrderAction action = type == 0 ? OrderAction.Buy : OrderAction.Sell;
             try
             {
-                var order = _account.CreateOrder(instrument, action, OrderType.Market, OrderEntry.Automated, TimeInForce.Gtc,
+                var order = link.Account.CreateOrder(instrument, action, OrderType.Market, OrderEntry.Automated, TimeInForce.Gtc,
                     qty, 0, 0, string.Empty, "ATP_" + magic, Core.Globals.MaxDate, null);
-                _account.Submit(new[] { order });
+                link.Account.Submit(new[] { order });
                 if (sl > 0 || tp > 0)
                 {
-                    _pendingBrackets[order] = new BracketInfo
+                    link.PendingBrackets[order] = new BracketInfo
                     {
                         Instrument = instrument,
                         ExitAction = action == OrderAction.Buy ? OrderAction.Sell : OrderAction.Buy,
@@ -1505,39 +1735,41 @@ namespace NinjaTrader.NinjaScript.AddOns
                     };
                 }
                 string openRoot = RootSymbol(instrument);
-                _magicToInstrument[magic] = openRoot;
-                _instrumentToMagic[openRoot] = magic;
-                Log("AutomaticTradingNT8: CMD_OPEN " + symbol + " " + action + " " + qty + " magic=" + magic, LogLevel.Information);
+                link.MagicToInstrument[magic] = openRoot;
+                link.InstrumentToMagic[openRoot] = magic;
+                Log("AutomaticTradingNT8: CMD_OPEN " + symbol + " " + action + " " + qty + " magic=" + magic +
+                    " en " + link.AccountName, LogLevel.Information);
             }
             catch (Exception ex) { Log("AutomaticTradingNT8: CMD_OPEN error: " + ex.Message, LogLevel.Error); }
         }
 
-        private void ExecuteClose(int magic)
+        private void ExecuteClose(AccountLink link, int magic)
         {
-            if (_account == null) { Log("AutomaticTradingNT8: CMD_CLOSE magic=" + magic + " sin cuenta.", LogLevel.Warning); return; }
+            if (link == null || link.Account == null) { Log("AutomaticTradingNT8: CMD_CLOSE magic=" + magic + " sin cuenta.", LogLevel.Warning); return; }
             string instrKey;
-            if (!_magicToInstrument.TryGetValue(magic, out instrKey))
+            if (!link.MagicToInstrument.TryGetValue(magic, out instrKey))
             {
                 // No callar: si el magic no se conoce, la copia se queda ABIERTA.
                 // Suele significar que el AddOn se reinicio y la orden original no
-                // aparece en _account.Orders (ver RebuildMagicMapFromOrders).
-                Log("AutomaticTradingNT8: CMD_CLOSE magic=" + magic +
-                    " desconocido: no se puede cerrar (posicion sin asociar).", LogLevel.Warning);
+                // aparece en Account.Orders (ver RebuildMagicMapFromOrders).
+                Log("AutomaticTradingNT8: CMD_CLOSE magic=" + magic + " desconocido en " + link.AccountName +
+                    ": no se puede cerrar (posicion sin asociar).", LogLevel.Warning);
                 return;
             }
             try
             {
-                var pos = _account.Positions.FirstOrDefault(p => RootSymbol(p.Instrument) == instrKey && p.MarketPosition != MarketPosition.Flat);
+                var pos = link.Account.Positions.FirstOrDefault(p => RootSymbol(p.Instrument) == instrKey && p.MarketPosition != MarketPosition.Flat);
                 if (pos == null)
                 {
-                    Log("AutomaticTradingNT8: CMD_CLOSE magic=" + magic + " (" + instrKey + "): ya no hay posicion abierta.", LogLevel.Information);
+                    Log("AutomaticTradingNT8: CMD_CLOSE magic=" + magic + " (" + instrKey + ", " + link.AccountName +
+                        "): ya no hay posicion abierta.", LogLevel.Information);
                     return;
                 }
                 var action = pos.MarketPosition == MarketPosition.Long ? OrderAction.Sell : OrderAction.Buy;
-                var order = _account.CreateOrder(pos.Instrument, action, OrderType.Market, OrderEntry.Automated, TimeInForce.Gtc,
+                var order = link.Account.CreateOrder(pos.Instrument, action, OrderType.Market, OrderEntry.Automated, TimeInForce.Gtc,
                     Math.Abs(pos.Quantity), 0, 0, string.Empty, "ATP_" + magic, Core.Globals.MaxDate, null);
-                _account.Submit(new[] { order });
-                Log("AutomaticTradingNT8: CMD_CLOSE magic=" + magic + " " + instrKey, LogLevel.Information);
+                link.Account.Submit(new[] { order });
+                Log("AutomaticTradingNT8: CMD_CLOSE magic=" + magic + " " + instrKey + " en " + link.AccountName, LogLevel.Information);
             }
             catch (Exception ex) { Log("AutomaticTradingNT8: CMD_CLOSE error: " + ex.Message, LogLevel.Error); }
         }
@@ -1896,12 +2128,15 @@ namespace NinjaTrader.NinjaScript.AddOns
     /// <summary>Alias publico corto para llamar desde Strategies sin exponer la clase AddOn completa.</summary>
     public static class AutomaticTradingBridge
     {
-        public static bool CheckTrade(string strategyTag, double lots, int type, long barTime, int priority, out int magic, out string reason)
+        /// <summary>accountName: pasar SIEMPRE `Account.Name` desde la strategy.
+        /// Con varias cuentas NT8 puenteadas, omitirlo gatea contra la cuenta del
+        /// feed y no contra la que va a recibir la orden.</summary>
+        public static bool CheckTrade(string strategyTag, double lots, int type, long barTime, int priority, out int magic, out string reason, string accountName = null)
         {
-            return AutomaticTradingNT8.CheckTrade(strategyTag, lots, type, barTime, priority, out magic, out reason);
+            return AutomaticTradingNT8.CheckTrade(strategyTag, lots, type, barTime, priority, out magic, out reason, accountName);
         }
 
-        public static void Release(string strategyTag) { AutomaticTradingNT8.Release(strategyTag); }
+        public static void Release(string strategyTag, string accountName = null) { AutomaticTradingNT8.Release(strategyTag, accountName); }
 
         public static string OrderTag(string strategyTag, int magic) { return AutomaticTradingNT8.OrderTag(strategyTag, magic); }
     }
