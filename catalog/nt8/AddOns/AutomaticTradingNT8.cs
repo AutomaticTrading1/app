@@ -82,6 +82,7 @@ namespace NinjaTrader.NinjaScript.AddOns
         private const string AccountNames = "";
         private const int StatePeriodMs = 2000;         // frecuencia de STATE (estado de cuenta)
         private const int AccountScanMs = 5000;         // cada cuanto se buscan cuentas nuevas/idas
+        private const int SymbolsMax = 500;             // tope de instrumentos en la respuesta a CMD_SYMBOLS
         private const int PingPeriodMs = 5000;
         private const int CheckTradeTimeoutMs = 3000;
 
@@ -985,6 +986,78 @@ namespace NinjaTrader.NinjaScript.AddOns
                 // de semana, festivos y horario de verano abren huecos.
                 StartProfile(parts[1], parts[2]);
             }
+            else if (cmd == "CMD_SYMBOLS")
+            {
+                SendSymbols(link);
+            }
+        }
+
+        // ------------------------- instrumentos disponibles (CMD_SYMBOLS) -------------------------
+
+        /// <summary>Responde SYMBOLS|&lt;raiz&gt;,&lt;raiz&gt;,... con los instrumentos que usa
+        /// este NinjaTrader.
+        ///
+        /// Lo pide la aplicacion para poder MAPEAR simbolos entre terminales: el
+        /// nombre de un instrumento no coincide entre plataformas (US100.cash en un
+        /// broker MT5 es MNQ aqui) y sin las dos listas el usuario tiene que
+        /// teclearlos de memoria.
+        ///
+        /// La fuente son las LISTAS DE INSTRUMENTOS del usuario (las de la ventana
+        /// de NinjaTrader), no la base de datos entera: esta trae miles de nombres
+        /// que nadie opera y no caben en un desplegable. Se completan con lo que
+        /// tenga posicion abierta y con lo ya resuelto en esta sesion. Se manda la
+        /// RAIZ ("MNQ", no "MNQ 09-26"), que es la que viaja en STATE y la que
+        /// sobrevive a los rolls.
+        ///
+        /// Va por la conexion de `link` y no por la del feed: la aplicacion guarda
+        /// la lista por terminal, y quien la pidio fue ese terminal.</summary>
+        private void SendSymbols(AccountLink link)
+        {
+            if (link == null || link.Conn == null || !link.Conn.IsLoggedIn) return;
+
+            var roots = new SortedSet<string>(StringComparer.OrdinalIgnoreCase);
+            try
+            {
+                lock (InstrumentList.All)
+                {
+                    foreach (var list in InstrumentList.All)
+                    {
+                        if (list == null || list.Instruments == null) continue;
+                        foreach (var instr in list.Instruments)
+                        {
+                            string root = RootSymbol(instr);
+                            if (!string.IsNullOrEmpty(root)) roots.Add(root);
+                        }
+                    }
+                }
+            }
+            catch (Exception ex) { Log("AutomaticTradingNT8: CMD_SYMBOLS listas: " + ex.Message, LogLevel.Warning); }
+
+            try
+            {
+                if (link.Account != null)
+                    foreach (var p in link.Account.Positions)
+                    {
+                        string root = RootSymbol(p.Instrument);
+                        if (!string.IsNullOrEmpty(root)) roots.Add(root);
+                    }
+            }
+            catch { }
+
+            foreach (var k in _rootCache.Keys) roots.Add(k);
+
+            // Sin listas configuradas no se manda la base de datos entera: seria un
+            // desplegable de miles de nombres. Mejor lista vacia y que el usuario
+            // escriba el instrumento a mano, que es lo que la aplicacion permite.
+            if (roots.Count == 0)
+                Log("AutomaticTradingNT8: CMD_SYMBOLS — no hay instrumentos en las listas de NinjaTrader. " +
+                    "Añade los que operes a una lista (o abre posicion) para que aparezcan en el mapeo de la aplicacion.",
+                    LogLevel.Warning);
+
+            var names = roots.Take(SymbolsMax).ToArray();
+            link.Conn.SendRaw("SYMBOLS|" + string.Join(",", names));
+            Log("AutomaticTradingNT8: CMD_SYMBOLS — " + names.Length + " instrumento(s) enviados desde " +
+                link.AccountName + ".", LogLevel.Information);
         }
 
         // ------------------------- historico de operaciones (CMD_HISTORY) -------------------------
