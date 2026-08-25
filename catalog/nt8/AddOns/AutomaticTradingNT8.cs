@@ -30,7 +30,7 @@
 //  DOS MODOS DE GATEO (software comercial: soporta ambos a la vez):
 //    A) PREVENTIVO (estrategias propias): la Strategy llama a
 //       AutomaticTradingBridge.CheckTrade(...) antes de entrar y solo abre si
-//       ALLOW. Control total, sin ventana de riesgo. Ver ATPGateDemo.cs.
+//       ALLOW. Control total, sin ventana de riesgo. Ver ATPGateProbe.cs.
 //    B) REACTIVO (estrategias de terceros/cerradas): ReactiveMode=true. NT8 no
 //       deja interceptar la orden ANTES de enviarse, asi que el AddOn vigila
 //       OrderUpdate; al aparecer una entrada NO gestionada consulta al servidor
@@ -82,7 +82,12 @@ namespace NinjaTrader.NinjaScript.AddOns
         private const string AccountNames = "";
         private const int StatePeriodMs = 2000;         // frecuencia de STATE (estado de cuenta)
         private const int AccountScanMs = 5000;         // cada cuanto se buscan cuentas nuevas/idas
-        private const int SymbolsMax = 500;             // tope de instrumentos en la respuesta a CMD_SYMBOLS
+        // Tope de instrumentos en la respuesta a CMD_SYMBOLS. El servidor lee por
+        // lineas acumulando en un buffer, sin limite de longitud, asi que caben de
+        // sobra. Estaba en 500 y era un truncado ALFABETICO silencioso: las listas
+        // por defecto de NinjaTrader traen cientos de acciones y el usuario recibia
+        // de la A a la C — MNQ no llegaba a aparecer en el mapeo.
+        private const int SymbolsMax = 5000;
         private const int PingPeriodMs = 5000;
         private const int CheckTradeTimeoutMs = 3000;
 
@@ -151,7 +156,7 @@ namespace NinjaTrader.NinjaScript.AddOns
         //      (ver nt8_manager.strategy_magic), asi que puede filtrar la copia
         //      de senales por estrategia sin ningun mensaje de protocolo extra.
         // REQUISITO: el strategyTag pasado a CheckTrade debe coincidir con el
-        // nombre del fichero .cs (p.ej. "ATPGateDemo" <-> ATPGateDemo.cs).
+        // nombre del fichero .cs (p.ej. "ATPGateProbe" <-> ATPGateProbe.cs).
         private const int MagicBase = 900001;
         private const int MagicRange = 90000;
 
@@ -293,6 +298,10 @@ namespace NinjaTrader.NinjaScript.AddOns
             // una lambda nueva no quitaria nada.
             public EventHandler<OrderEventArgs> OrderHandler;
             public EventHandler<ExecutionEventArgs> ExecutionHandler;
+
+            // Ultimo bloque de posiciones enviado en STATE. Solo para trazar los
+            // CAMBIOS: STATE sale cada 2 s y registrarlo entero seria ilegible.
+            public string LastPositionsCsv = null;
         }
 
         protected override void OnStateChange()
@@ -744,7 +753,24 @@ namespace NinjaTrader.NinjaScript.AddOns
                       .Append("0:0:").Append(Num(unrealized)).Append(':').Append(magic);
                 }
 
-                link.Conn.SendRaw(sb.ToString());
+                // Que posiciones se estan mandando, cuando cambian. Sin esto, "la
+                // aplicacion no ve mis operaciones" no distingue entre que NT8 no
+                // las reporte, que lleguen con otro nombre de instrumento o que el
+                // motor las descarte: los tres se ven igual desde fuera.
+                string posCsv = sb.ToString();
+                int corte = posCsv.IndexOf('|');
+                for (int i = 0; i < 4 && corte >= 0; i++) corte = posCsv.IndexOf('|', corte + 1);
+                string soloPos = corte >= 0 && corte + 1 < posCsv.Length ? posCsv.Substring(corte + 1) : "";
+                if (soloPos != link.LastPositionsCsv)
+                {
+                    link.LastPositionsCsv = soloPos;
+                    Log("AutomaticTradingNT8: STATE de " + link.AccountName + " — posiciones: " +
+                        (soloPos.Length == 0 ? "(ninguna)" : soloPos) +
+                        "   [formato ticket:instrumento:tipo:cantidad:precio:0:0:pnl:magic]",
+                        LogLevel.Information);
+                }
+
+                link.Conn.SendRaw(posCsv);
             }
             catch (Exception ex) { Log("AutomaticTradingNT8: error enviando STATE de " + link.AccountName + ": " + ex.Message, LogLevel.Warning); }
         }
@@ -1056,6 +1082,12 @@ namespace NinjaTrader.NinjaScript.AddOns
 
             var names = roots.Take(SymbolsMax).ToArray();
             link.Conn.SendRaw("SYMBOLS|" + string.Join(",", names));
+            // Si alguna vez se toca el tope hay que DECIRLO: un truncado silencioso
+            // deja al usuario buscando en el mapeo un instrumento que nunca se mando.
+            if (roots.Count > names.Length)
+                Log("AutomaticTradingNT8: CMD_SYMBOLS — " + roots.Count + " instrumentos en las listas, " +
+                    "se mandan los " + names.Length + " primeros por orden alfabetico. Reduce tus listas de " +
+                    "NinjaTrader si falta alguno en el mapeo.", LogLevel.Warning);
             Log("AutomaticTradingNT8: CMD_SYMBOLS — " + names.Length + " instrumento(s) enviados desde " +
                 link.AccountName + ".", LogLevel.Information);
         }
