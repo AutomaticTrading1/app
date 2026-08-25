@@ -278,8 +278,8 @@ namespace NinjaTrader.NinjaScript.AddOns
 
             // Ver comentario de MagicBase: mapas POR CUENTA (netting por
             // cuenta+instrumento).
-            public readonly ConcurrentDictionary<int, string> MagicToInstrument = new ConcurrentDictionary<int, string>();
-            public readonly ConcurrentDictionary<string, int> InstrumentToMagic = new ConcurrentDictionary<string, int>();
+            public readonly ConcurrentDictionary<long, string> MagicToInstrument = new ConcurrentDictionary<long, string>();
+            public readonly ConcurrentDictionary<string, long> InstrumentToMagic = new ConcurrentDictionary<string, long>();
             public readonly ConcurrentDictionary<Order, BracketInfo> PendingBrackets = new ConcurrentDictionary<Order, BracketInfo>();
 
             // Modo reactivo: cola de ordenes de terceros pendientes de gatear +
@@ -529,9 +529,9 @@ namespace NinjaTrader.NinjaScript.AddOns
                     string nm = o.Name ?? "";
                     if (!nm.StartsWith("ATP_", StringComparison.Ordinal)) continue;
 
-                    int magic;
+                    long magic;
                     // "ATP_flatten", "ATP_bracket", "ATP_reactive_close" no parsean: se ignoran.
-                    if (!int.TryParse(nm.Substring(4), NumberStyles.Integer, CultureInfo.InvariantCulture, out magic))
+                    if (!long.TryParse(nm.Substring(4), NumberStyles.Integer, CultureInfo.InvariantCulture, out magic))
                         continue;
 
                     CacheInstrument(o.Instrument);
@@ -732,7 +732,7 @@ namespace NinjaTrader.NinjaScript.AddOns
                     // contrato. Las ordenes se ejecutan resolviendo el frontal.
                     CacheInstrument(p.Instrument);
                     string instrKey = RootSymbol(p.Instrument);
-                    int magic;
+                    long magic;
                     if (!link.InstrumentToMagic.TryGetValue(instrKey, out magic)) magic = 0;
                     // "ticket" sintetico: NT8 netea por instrumento, no hay id de posicion
                     // estable como el ticket de MT5. Determinista para un mismo
@@ -742,7 +742,7 @@ namespace NinjaTrader.NinjaScript.AddOns
                     // `magic` de la posicion destino, y el magic de MT5 es ulong. Un
                     // valor negativo (GetHashCode devuelve int con signo) seria
                     // invalido para order_send.
-                    int ticket = unchecked(instrKey.GetHashCode() ^ (magic * 397)) & 0x7FFFFFFF;
+                    int ticket = (int)(unchecked(instrKey.GetHashCode() ^ (magic * 397)) & 0x7FFFFFFF);
                     if (ticket == 0) ticket = 1;   // 0 esta reservado a "sin magic"
                     string type = p.MarketPosition == MarketPosition.Long ? "BUY" : "SELL";
                     double unrealized = 0;
@@ -902,8 +902,8 @@ namespace NinjaTrader.NinjaScript.AddOns
                 string name = e.Execution.Order.Name ?? "";
                 if (name.StartsWith("ATP_", StringComparison.Ordinal))
                 {
-                    int magic;
-                    if (int.TryParse(name.Substring(4), NumberStyles.Any, CultureInfo.InvariantCulture, out magic))
+                    long magic;
+                    if (long.TryParse(name.Substring(4), NumberStyles.Any, CultureInfo.InvariantCulture, out magic))
                     {
                         CacheInstrument(e.Execution.Instrument);
                         string instrKey = RootSymbol(e.Execution.Instrument);
@@ -955,17 +955,17 @@ namespace NinjaTrader.NinjaScript.AddOns
                 double volume = ParseD(parts[3]);
                 double sl = ParseD(parts[4]);
                 double tp = ParseD(parts[5]);
-                int magic = (int)ParseD(parts[6]);
+                long magic = ParseMagic(parts[6]);
                 ExecuteOpen(link, symbol, type, volume, sl, tp, magic);
             }
             else if (cmd == "CMD_CLOSE" && parts.Length >= 2)
             {
-                int magic = (int)ParseD(parts[1]);
+                long magic = ParseMagic(parts[1]);
                 ExecuteClose(link, magic);
             }
             else if (cmd == "CMD_UPDATE_SLTP" && parts.Length >= 4)
             {
-                int magic = (int)ParseD(parts[1]);
+                long magic = ParseMagic(parts[1]);
                 double sl = ParseD(parts[2]);
                 double tp = ParseD(parts[3]);
                 ExecuteUpdateSlTp(magic, sl, tp);
@@ -1815,7 +1815,7 @@ namespace NinjaTrader.NinjaScript.AddOns
             catch (Exception ex) { Log("AutomaticTradingNT8: FlattenAll: " + ex.Message, LogLevel.Error); }
         }
 
-        private void ExecuteOpen(AccountLink link, string symbol, int type, double volume, double sl, double tp, int magic)
+        private void ExecuteOpen(AccountLink link, string symbol, int type, double volume, double sl, double tp, long magic)
         {
             if (link == null || link.Account == null) { Log("AutomaticTradingNT8: CMD_OPEN sin cuenta.", LogLevel.Warning); return; }
             // symbol puede venir como raiz ("MNQ") o contrato completo: ResolveInstrument
@@ -1848,7 +1848,7 @@ namespace NinjaTrader.NinjaScript.AddOns
             catch (Exception ex) { Log("AutomaticTradingNT8: CMD_OPEN error: " + ex.Message, LogLevel.Error); }
         }
 
-        private void ExecuteClose(AccountLink link, int magic)
+        private void ExecuteClose(AccountLink link, long magic)
         {
             if (link == null || link.Account == null) { Log("AutomaticTradingNT8: CMD_CLOSE magic=" + magic + " sin cuenta.", LogLevel.Warning); return; }
             string instrKey;
@@ -1879,13 +1879,26 @@ namespace NinjaTrader.NinjaScript.AddOns
             catch (Exception ex) { Log("AutomaticTradingNT8: CMD_CLOSE error: " + ex.Message, LogLevel.Error); }
         }
 
-        private void ExecuteUpdateSlTp(int magic, double sl, double tp)
+        private void ExecuteUpdateSlTp(long magic, double sl, double tp)
         {
             // Reservado: requiere localizar/cancelar las ordenes hijas SL/TP existentes
             // del bracket de ese magic y recolocarlas. No implementado en v1 (el
             // copiador de señales sincroniza SL/TP tras abrir; para NT8 el bracket ya
             // se coloca en la apertura via CMD_OPEN — ver PlaceBracket).
             Log("AutomaticTradingNT8: CMD_UPDATE_SLTP magic=" + magic + " no implementado en v1.", LogLevel.Warning);
+        }
+
+        /// <summary>Magic que llega en los CMD_. En la copia MT5 -&gt; NT8 el magic ES
+        /// el TICKET de la posicion origen, y los tickets de MT5 son `ulong`: ya se
+        /// han visto por encima de 2.147.483.647. Con `int` desbordaban todos al
+        /// mismo `int.MinValue`, dos copias distintas compartian entrada en
+        /// MagicToInstrument y un CMD_CLOSE cerraba la posicion equivocada. Por eso
+        /// `long` en todo el camino (mapas, tag ATP_, STATE).</summary>
+        private static long ParseMagic(string s)
+        {
+            long v;
+            if (long.TryParse(s, NumberStyles.Integer, CultureInfo.InvariantCulture, out v)) return v;
+            return (long)ParseD(s);   // por si llegara con decimales ("123.0")
         }
 
         private static double ParseD(string s)

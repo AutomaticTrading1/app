@@ -23,9 +23,9 @@
       "platform": "nt8",
       "kind": "AddOns",
       "file": "AutomaticTradingNT8.cs",
-      "version": "1.72",
-      "sha256": "bfb711695384f208af2ec38d8e93159b8bc7c691dff5143f7777cbc7a23b79a6",
-      "notes": "AddOn puente para NinjaTrader 8: gate de riesgo, copia de senales y datos compartidos con MT5. Puentea todas las cuentas conectadas a la vez, cada una como su propio terminal. Novedades: manda la lista completa de instrumentos de tus listas de NinjaTrader (antes se cortaba en 500 por orden alfabetico y faltaban los del final), y deja en el log de NinjaTrader que posiciones reporta cada cuenta, para poder ver por que una copia no sale.",
+      "version": "1.73",
+      "sha256": "d8db09db40d02a41053c7f8f26dc861fa029b24234ce82ee22de6ca47a2e1eed",
+      "notes": "AddOn puente para NinjaTrader 8: gate de riesgo, copia de senales y datos compartidos con MT5. Puentea todas las cuentas conectadas a la vez, cada una como su propio terminal. Novedades: corregido un fallo que podia cerrar la posicion equivocada al copiar de MetaTrader a NinjaTrader. La copia se identifica por el ticket de la posicion de origen, y los tickets de MT5 por encima de 2.147.483.647 se desbordaban y acababan todos en el mismo valor: con dos copias vivas en la misma cuenta, el cierre de una cerraba la otra. Ahora el AddOn maneja esos numeros en 64 bits. Tras instalarlo hay que recompilar en NinjaScript (F5).",
       "min_app": "1.6"
     }
   ]
