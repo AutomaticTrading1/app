@@ -23,8 +23,8 @@
       "platform": "nt8",
       "kind": "AddOns",
       "file": "AutomaticTradingNT8.cs",
-      "version": "1.74",
-      "sha256": "08da500582e5dc2b58e4625a91617a02479197716816fe4b3001ff3a485b70b9",
+      "version": "1.75",
+      "sha256": "f342d472dd5b572a1fe5a31850f56693b6264f879191c2ca9ca86abeb6c6b148",
       "notes": "AddOn puente para NinjaTrader 8: gate de riesgo, copia de senales y datos compartidos con MT5. Puentea todas las cuentas conectadas a la vez, cada una como su propio terminal. Novedades, todas sobre las ordenes contrarias que hacen de SL/TP: la cantidad del bracket ahora SIGUE a la de la posicion — al ampliar protegia de menos y al recortar protegia de MAS, y un bracket mayor que la posicion abre posicion en sentido contrario si salta. Una contraria que se queda sin posicion detras se cancela sola, venga el cierre por donde venga. Las contrarias se recuperan tras recompilar el AddOn, en vez de quedarse vivas fuera de control. Y los estados de paso de una orden (ChangeSubmitted, CancelSubmitted) ya no se confunden con una orden muerta: eso provocaba brackets duplicados al redimensionar y dejaba pasar ordenes en la parada de emergencia. Ademas confirma a la aplicacion cuando el broker acepta o rechaza un nivel, en vez de que ella lo deduzca del estado. Tras instalarlo hay que recompilar en NinjaScript (F5).",
       "min_app": "1.7"
     }

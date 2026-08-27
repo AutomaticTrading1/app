@@ -1,59 +1,30 @@
 // =============================================================================
 //  AutomaticTradingNT8.cs  -  Puente NinjaTrader 8 -> ATPortfolio (AutomaticTrading)
 // -----------------------------------------------------------------------------
-//  AddOn CLIENTE (topologia contraria a documentation/reference/DmriBridgeAddOn.cs,
-//  que es servidor JSON de otro proyecto). Aqui NT8 conecta como cliente a
-//  socket_server.py:5006 y habla el protocolo `|`-texto que ya usan los EAs MT5
-//  (ver documentation/GUIA_NT8_desde_te_mt5.md).
+//  AddOn CLIENTE: NT8 conecta a socket_server.py:5006 y habla el protocolo
+//  `|`-texto que ya usan los EAs MT5. Puentea CADA cuenta por separado como un
+//  terminal independiente ("NT8_<Cuenta>"): gate de riesgo, STATE, destino de
+//  copia de senales y feed de mercado (ticks, L2, historico, perfil).
 //
-//  INSTALACION:
-//    1. Copiar este archivo a Documents\NinjaTrader 8\bin\Custom\AddOns\
-//       (o Tools -> Import -> NinjaScript Add-On...).
-//    2. Revisar la seccion CONFIGURACION (por defecto NO hay que tocar nada:
-//       se puentean TODAS las cuentas conectadas).
-//    3. Compilar en NinjaScript Editor (F5). Validar en Sim101 antes de real
-//       (ver documentation/GUIA_NT8_desde_te_mt5.md #7 - la leccion mas cara).
+//  INSTALACION: copiar a Documents\NinjaTrader 8\bin\Custom\AddOns\ (o Tools ->
+//  Import -> NinjaScript Add-On...), compilar con F5 y validar en Sim101 antes
+//  de una cuenta real. Por defecto se puentean TODAS las cuentas conectadas; se
+//  limitan en CONFIGURACION, igual que el modo reactivo.
 //
-//  MULTI-CUENTA (a diferencia de MT5):
-//  MT5 ata un terminal a UNA cuenta; NinjaTrader tiene varias cuentas vivas en
-//  el mismo proceso (Sim101, DEMO..., real...). Cada cuenta se puentea por
-//  SEPARADO: su propia conexion TCP con terminal_id "NT8_<Cuenta>", su propio
-//  STATE, su propio gateo y sus propias ordenes. Para la app son terminales
-//  independientes, asi que la copia de señales entre dos cuentas NT8 del mismo
-//  NinjaTrader funciona igual que MT5 -> MT5.
-//
-//  El FEED de mercado (ticks, L2, historico, perfil) NO es de la cuenta sino de
-//  la conexion de datos: lo sirve UNA sola cuenta (la primera puenteada, ver
-//  _dataLink). Si lo sirvieran todas, cada operacion llegaria duplicada al
-//  buffer del servidor y el footprint contaria el volumen dos veces.
-//
-//  DOS MODOS DE GATEO (software comercial: soporta ambos a la vez):
-//    A) PREVENTIVO (estrategias propias): la Strategy llama a
-//       AutomaticTradingBridge.CheckTrade(...) antes de entrar y solo abre si
-//       ALLOW. Control total, sin ventana de riesgo. Ver ATPGateProbe.cs.
-//    B) REACTIVO (estrategias de terceros/cerradas): ReactiveMode=true. NT8 no
-//       deja interceptar la orden ANTES de enviarse, asi que el AddOn vigila
-//       OrderUpdate; al aparecer una entrada NO gestionada consulta al servidor
-//       y si DENY cancela la orden (si sigue viva) o cierra la posicion (si ya
-//       lleno). Las ordenes del modo A (Name "ATP_*") quedan exentas del modo B.
-//
-//  INTEGRACION DESDE UNA STRATEGY (modo A):
-//    int magic;
-//    string reason;
-//    if (AutomaticTradingBridge.CheckTrade("MiEstrategia", 1, 0, ToTime(Time[0]), 1, out magic, out reason))
+//  API PARA UNA STRATEGY PROPIA (gate preventivo):
+//    if (AutomaticTradingBridge.CheckTrade(tag, lots, type, barTime, priority,
+//                                          out magic, out reason, Account.Name))
 //    {
-//        EnterLong(1, AutomaticTradingBridge.OrderTag("MiEstrategia", magic));
-//        AutomaticTradingBridge.Release("MiEstrategia");
+//        EnterLong(qty, AutomaticTradingBridge.OrderTag(tag, magic));
+//        AutomaticTradingBridge.Release(tag, Account.Name);
 //    }
-//  El "OrderTag" DEBE usarse como nombre/señal de entrada de la orden: es la
-//  unica forma de que el bridge (y por tanto STATE) sepa a que magic
-//  sintetico pertenece cada posicion — NT8 no tiene Magic Number nativo.
+//  type: 0=Buy, 1=Sell. barTime: ToTime(Time[0]). priority: 0 = sin turno.
+//  El OrderTag DEBE ser el nombre de la entrada: NT8 no tiene Magic Number y es
+//  lo unico que ata la posicion a su magic. Las estrategias de TERCEROS no
+//  necesitan nada: las gatea ReactiveMode.
 //
-//  LIMITACION CONOCIDA (netting NT8 por cuenta+instrumento, ver guia #4.3):
-//  v1 asume UNA estrategia NT8 por instrumento por cuenta. Con esa asuncion,
-//  el mapeo magic<->instrumento es 1:1 y determinista; con varias estrategias
-//  en el mismo instrumento NT8 las netea y esa asociacion se rompe. No se
-//  resuelve aqui (tampoco esta resuelto en el proyecto hermano DMRI).
+//  LIMITACION: NT8 netea por cuenta+instrumento. Se asume UNA estrategia por
+//  instrumento y cuenta; con varias, el mapeo magic<->instrumento se rompe.
 // =============================================================================
 
 using System;
@@ -75,37 +46,23 @@ namespace NinjaTrader.NinjaScript.AddOns
         // ===================== CONFIGURACION =====================
         private const string ServerHost = "127.0.0.1";
         private const int ServerPort = 5006;
-        // Cuentas a puentear. Vacio "" = TODAS las cuentas conectadas de este
-        // NinjaTrader (recomendado: no hay que editar nada y las cuentas nuevas
-        // aparecen solas en la app). Para limitarlo, lista separada por comas:
-        //   private const string AccountNames = "Sim101,DEMO3005427";
+        // Cuentas a puentear. "" = TODAS las conectadas (recomendado: las
+        // cuentas nuevas aparecen solas en la app). Para limitar, lista separada
+        // por comas: "Sim101,DEMO3005427".
         private const string AccountNames = "";
         private const int StatePeriodMs = 2000;         // frecuencia de STATE (estado de cuenta)
         private const int AccountScanMs = 5000;         // cada cuanto se buscan cuentas nuevas/idas
-        // Tope de instrumentos en la respuesta a CMD_SYMBOLS. El servidor lee por
-        // lineas acumulando en un buffer, sin limite de longitud, asi que caben de
-        // sobra. Estaba en 500 y era un truncado ALFABETICO silencioso: las listas
-        // por defecto de NinjaTrader traen cientos de acciones y el usuario recibia
-        // de la A a la C — MNQ no llegaba a aparecer en el mapeo.
-        private const int SymbolsMax = 5000;
+        private const int SymbolsMax = 5000;   // tope de instrumentos en CMD_SYMBOLS
         private const int PingPeriodMs = 5000;
         private const int CheckTradeTimeoutMs = 3000;
 
-        // MODO REACTIVO: gatea estrategias de TERCEROS (que no llaman a
-        // AutomaticTradingBridge.CheckTrade). NT8 no permite interceptar la
-        // orden ANTES de enviarse, asi que este modo es reactivo: al aparecer
-        // una entrada no gestionada, consulta al servidor y si DENY cancela la
-        // orden (si sigue viva) o cierra la posicion (si ya lleno). Ponlo a
-        // false si SOLO usas estrategias propias con CheckTrade explicito
-        // (control preventivo, sin ventana reactiva).
+        // MODO REACTIVO: gatea tambien las estrategias de TERCEROS, las que no
+        // llaman a CheckTrade. Ponlo a false si solo usas estrategias propias.
         //
-        // OJO con multi-cuenta: esto aplica a TODAS las cuentas puenteadas, y una
-        // cuenta recien descubierta entra en la app con los limites POR DEFECTO
-        // (2 contratos totales, 1 por instrumento). En una cuenta con posiciones
-        // mayores, una entrada de un tercero se cancelaria o se aplanaria hasta que
-        // se suban sus limites en Control del Riesgo. Con cuentas reales: o revisas
-        // sus limites en cuanto aparecen, o pones ReactiveMode = false, o limitas
-        // AccountNames a las cuentas que quieras gatear.
+        // OJO: aplica a TODAS las cuentas puenteadas, y una cuenta recien
+        // descubierta entra con los limites POR DEFECTO de la app (2 contratos).
+        // Con cuentas reales, revisa sus limites en Control del Riesgo en cuanto
+        // aparezcan, o limita AccountNames, o pon esto a false.
         private const bool ReactiveMode = true;
         // ===========================================================
 
@@ -115,17 +72,12 @@ namespace NinjaTrader.NinjaScript.AddOns
         // Un AccountLink por cuenta puenteada, indexado por nombre de cuenta.
         private readonly ConcurrentDictionary<string, AccountLink> _links =
             new ConcurrentDictionary<string, AccountLink>();
-        // Cuenta que sirve el FEED de mercado (ticks/L2/historico/perfil). Una
-        // sola: ver la cabecera del archivo. Es la primera que se puentea.
+        // Cuenta que sirve el FEED de mercado. Una sola: la primera puenteada.
         private volatile AccountLink _dataLink;
         private Thread _scanThread;
 
-        /// <summary>Conexion por la que sale TODO el feed de mercado.
-        ///
-        /// Los comandos de datos (CMD_STREAM/CMD_HISTORY/CMD_PROFILE/...) pueden
-        /// llegar por CUALQUIER cuenta —el servidor elige un cliente NT8 sin mirar
-        /// la cuenta— pero la respuesta sale siempre por esta, para que el buffer
-        /// del servidor reciba cada operacion UNA vez.</summary>
+        /// <summary>Conexion por la que sale TODO el feed. Una sola cuenta lo
+        /// sirve: si no, cada operacion llegaria duplicada al servidor.</summary>
         private SocketConn DataConn
         {
             get { var l = _dataLink; return l != null ? l.Conn : null; }
@@ -137,143 +89,81 @@ namespace NinjaTrader.NinjaScript.AddOns
             get { var c = DataConn; return c != null && c.IsLoggedIn; }
         }
 
-        /// <summary>Envia una linea de feed (TRADE/TICK/DEPTH/PROFILE/...) por la
-        /// conexion de datos. Lee la conexion UNA vez: la cuenta del feed puede
-        /// cambiar entre el chequeo y el envio (ver PromoteDataLink).</summary>
+        /// <summary>Envia una linea de feed. Lee la conexion UNA vez: la cuenta
+        /// del feed puede cambiar entre el chequeo y el envio.</summary>
         private void SendData(string line)
         {
             var c = DataConn;
             if (c != null && c.IsLoggedIn) c.SendRaw(line);
         }
 
-        // Magic sintetico por estrategia. NT8 no tiene Magic Number: se asigna
-        // la primera vez que una strategy llama CheckTrade con un tag nuevo.
-        // El magic se DERIVA del nombre de la estrategia con un hash estable
-        // (FNV-1a 32 bits), no de un contador. Dos consecuencias buscadas:
-        //   1. Es el mismo numero en cada arranque: una posicion abierta no
-        //      pierde su identidad al reiniciar NT8.
-        //   2. La app calcula el mismo magic desde el nombre del fichero .cs
-        //      (ver nt8_manager.strategy_magic), asi que puede filtrar la copia
-        //      de senales por estrategia sin ningun mensaje de protocolo extra.
-        // REQUISITO: el strategyTag pasado a CheckTrade debe coincidir con el
-        // nombre del fichero .cs (p.ej. "ATPGateProbe" <-> ATPGateProbe.cs).
+        // Magic sintetico: NT8 no tiene Magic Number. Se DERIVA del nombre de la
+        // estrategia (FNV-1a 32 bits), no de un contador, y el strategyTag debe
+        // coincidir con el nombre del fichero .cs.
         private const int MagicBase = 900001;
         private const int MagicRange = 90000;
 
-        // magic -> ultimo instrumento operado con ese magic (para CMD_CLOSE y
-        // para resolver el magic de una posicion en STATE): vive en AccountLink,
-        // POR CUENTA. NT8 netea por cuenta+instrumento, asi que el mismo
-        // instrumento en dos cuentas son dos posiciones distintas y compartir el
-        // mapa haria que un CMD_CLOSE cerrase en la cuenta equivocada. Ver
-        // limitacion de netting en la cabecera del archivo.
+        // Los mapas magic <-> instrumento viven en AccountLink, POR CUENTA.
 
-        // Bracket SL/TP pendiente por instancia Order. Order.OrderId MUTA al
-        // aceptar el broker el submit (GUID interno -> id real): NUNCA usarlo
-        // como clave (gotcha real, causo posiciones sin SL/TP en el proyecto
-        // hermano DMRI). La instancia Order es estable entre submit y eventos.
+        // Bracket SL/TP pendiente. Clave: la INSTANCIA Order, nunca OrderId (muta).
         private class BracketInfo
         {
             public NinjaTrader.Cbi.Instrument Instrument;
             public OrderAction ExitAction;
             public int Qty;
             public double Sl, Tp;
-            // Magic de la posicion a la que protegen. Va en el NOMBRE de la orden
-            // (ver BracketName): es lo unico que ata una contraria a SU posicion,
-            // porque NinjaTrader netea y no da un id de posicion estable.
+            // Magic protegido. Va en el NOMBRE de la orden (ver BracketName).
             public long Magic;
         }
 
-        /// <summary>Nombre de las contrarias que hacen de SL/TP de una posicion.
-        /// Lleva el magic dentro para que la asociacion sea exacta.</summary>
+        /// <summary>Nombre de las contrarias SL/TP. Lleva el magic dentro: es lo
+        /// unico que ata una contraria a SU posicion.</summary>
         private static string BracketName(long magic)
         {
             return "ATP_bracket_" + magic;
         }
-        // _pendingBrackets, la cola del modo reactivo y las conexiones de las
-        // strategies viven en AccountLink: todo eso termina en una orden sobre
-        // UNA cuenta concreta.
 
-        // Streaming de ticks (CMD_STREAM 'Compartir local'): instrumentos cuyos
-        // ticks se empujan al server (TICK|raiz|bid|ask|last) para que un EA/
-        // indicador MT5 los lea via GET_TICK. Throttle por raiz.
+        // Streaming de ticks (CMD_STREAM), para GET_TICK desde un EA MT5.
         private readonly ConcurrentDictionary<string, NinjaTrader.Cbi.Instrument> _streamed =
             new ConcurrentDictionary<string, NinjaTrader.Cbi.Instrument>();
         private readonly ConcurrentDictionary<string, long> _lastTickSentMs =
             new ConcurrentDictionary<string, long>();
         private const int TickThrottleMs = 250;
 
-        // Diagnostico del feed: que tipos de MarketData hemos visto por raiz, y
-        // cuantos trades hemos enviado. Sin esto, "no llegan ticks" no distingue
-        // entre "el instrumento no publica operaciones" y "el puente falla".
+        // Diagnostico del feed: tipos de MarketData vistos y trades enviados.
         private readonly ConcurrentDictionary<string, byte> _mdSeen =
             new ConcurrentDictionary<string, byte>();
         private readonly ConcurrentDictionary<string, long> _tradesSent =
             new ConcurrentDictionary<string, long>();
 
-        // Historico de operaciones (CMD_HISTORY). El buffer de trades del servidor
-        // vive en RAM y se pierde al reiniciar la app; NinjaTrader es el unico que
-        // tiene el historico de verdad, asi que el EA del footprint lo pide al
-        // arrancar y el AddOn lo vuelca con BarsRequest.
-        //
-        // Mientras se envia el historico, los trades EN VIVO de esa raiz se ENCOLAN
-        // en vez de mandarse: el EA localiza los ticks de cada vela por biseccion y
-        // eso exige orden cronologico. Si un trade de ahora se colara delante de un
-        // trade de hace tres horas, la busqueda fallaria en silencio.
+        // Historico de operaciones (CMD_HISTORY). Mientras se envia, los trades EN
+        // VIVO de esa raiz se ENCOLAN: el EA los busca por biseccion y eso exige
+        // orden cronologico.
         private readonly ConcurrentDictionary<string, ConcurrentQueue<KeyValuePair<long, string>>> _histQueue =
             new ConcurrentDictionary<string, ConcurrentQueue<KeyValuePair<long, string>>>();
 
-        // Envio del historico troceado: 500k lineas seguidas por el socket bloquean
-        // el hilo y dejan a NT8 sin responder. Se manda en lotes con una pausa.
+        // Troceado: 500k lineas seguidas por el socket dejan a NT8 sin responder.
         private const int HistChunk   = 5000;
         private const int HistPauseMs = 15;
 
-        // Ventana MAXIMA que se le pide a NT8 por rango de fechas.
-        //
-        // El EA pide por VELAS: en un grafico D1 de 24 velas eso son ~4 SEMANAS de
-        // ticks. Ese BarsRequest (x3: Bid, Ask, Last) no lo sirve NT8 en un tiempo
-        // razonable, y mientras dura el volcado los trades en vivo se RETIENEN en
-        // _histQueue — o sea que el puente deja de mandar nada y el footprint se
-        // queda a cero indefinidamente ("Puente: sincronizando... 0", "Basis:
-        // esperando tick..."), en ESE grafico y en todos los demas de la misma raiz.
-        //
-        // Mas atras de este tope se pide por NUMERO de ticks, que es exactamente lo
-        // que el tope nTicks iba a dejar de todas formas: en MNQ, 500k operaciones
-        // son unas 2-3 horas. No se pierde nada que el EA pudiera mostrar.
+        // Ventana MAXIMA por rango de fechas; mas atras se sirve por numero de
+        // ticks. Un rango mayor deja el volcado colgado y el footprint a cero.
         private const int HistMaxHours = 12;
 
-        // Streaming de profundidad L2/DOM (CMD_STREAM_DEPTH). Alto volumen:
-        // throttle mayor.
-        //
-        // NO se mantiene libro propio. Se mantuvo (un SortedList por precio y lado,
-        // alimentado con los eventos Add/Update/Remove) y era un error de diseno:
-        // una copia que envejece. Los precios que NT8 deja de reportar al alejarse
-        // el mercado no siempre traen su Remove, se quedaban dentro para siempre y
-        // el envio los sacaba como si fueran libro vivo. El unico libro es el de
-        // NinjaTrader, leido en OnMarketDepth.
+        // Streaming de profundidad L2/DOM (CMD_STREAM_DEPTH). NO se mantiene libro
+        // propio: el unico libro es el de NinjaTrader, leido en OnMarketDepth.
         private readonly ConcurrentDictionary<string, NinjaTrader.Cbi.Instrument> _depthStreamed =
             new ConcurrentDictionary<string, NinjaTrader.Cbi.Instrument>();
         private readonly ConcurrentDictionary<string, long> _lastDepthSentMs =
             new ConcurrentDictionary<string, long>();
-        // 250 ms: el DOM del footprint a 500 ms se veia a saltos. No se sube
-        // DepthLevels de 10: mas niveles cuadruplicarian el trafico L2 por el
-        // MISMO socket que drena los trades del footprint, y ese feed ya funciona.
         private const int DepthThrottleMs = 250;
         private const int DepthLevels = 10;
 
-        // Conexion dedicada a STATE/PING/recepcion de comandos push (CMD_OPEN/
-        // CMD_CLOSE/CMD_UPDATE_SLTP). Las llamadas CheckTrade de cada strategy
-        // usan su PROPIA conexion (una por magic) porque el servidor identifica
-        // al llamante por la conexion TCP (LOGIN fija el magic de ese socket),
-        // igual que cada EA MT5 abre su propio socket.
-        // (una instancia de esto por cuenta: ver AccountLink)
+        // Cada strategy usa su PROPIA conexion: el LOGIN fija el magic del socket.
 
-        /// <summary>Todo lo que es de UNA cuenta NinjaTrader.
-        ///
-        /// Un NinjaTrader tiene varias cuentas vivas a la vez y la app las trata
-        /// como terminales independientes ("NT8_&lt;Cuenta&gt;"). Cada una necesita su
-        /// propia conexion TCP porque el servidor identifica al terminal por la
-        /// conexion (el LOGIN fija terminal_id y magic de ese socket), igual que
-        /// cada EA MT5 abre la suya.</summary>
+        /// <summary>Todo lo que es de UNA cuenta NinjaTrader. La app las trata como
+        /// terminales independientes ("NT8_&lt;Cuenta&gt;") y cada una necesita su propia
+        /// conexion: el servidor identifica al terminal por el socket.</summary>
         private class AccountLink
         {
             public string AccountName;
@@ -281,37 +171,24 @@ namespace NinjaTrader.NinjaScript.AddOns
             public Account Account;
             public SocketConn Conn;
             public Thread BridgeThread;
-            // Este link concreto esta cerrado. NO vale mirar si su cuenta sigue en
-            // _links: una cuenta que se va y vuelve entre dos escaneos crea un link
-            // NUEVO con el mismo nombre, y el hilo del viejo seguiria vivo
-            // reconectando su socket — dos conexiones con el mismo terminal_id.
+            // Este link concreto esta cerrado. NO vale mirar si la cuenta sigue en
+            // _links: una que se va y vuelve crea un link nuevo con el mismo nombre.
             public volatile bool Stopped;
 
-            // Ver comentario de MagicBase: mapas POR CUENTA (netting por
-            // cuenta+instrumento).
+            // Mapas POR CUENTA: NT8 netea por cuenta+instrumento.
             public readonly ConcurrentDictionary<long, string> MagicToInstrument = new ConcurrentDictionary<long, string>();
             public readonly ConcurrentDictionary<string, long> InstrumentToMagic = new ConcurrentDictionary<string, long>();
             public readonly ConcurrentDictionary<Order, BracketInfo> PendingBrackets = new ConcurrentDictionary<Order, BracketInfo>();
 
-            // NUESTRA asociacion posicion <-> contrarias. En NinjaTrader un SL/TP
-            // no es un campo de la posicion sino una ORDEN en el libro, asi que si
-            // no la anotamos nosotros nadie sabe que esa Stop es el stop de esa
-            // posicion y no una orden cualquiera del usuario. El nombre
-            // (ATP_bracket_<magic>) sirve para reconocerlas tras reiniciar el
-            // AddOn, pero mientras corre manda este registro: es exacto y no
-            // depende de leer cadenas.
+            // NUESTRA asociacion posicion <-> contrarias: en NinjaTrader un SL/TP es
+            // una ORDEN del libro, no un campo de la posicion.
             public readonly ConcurrentDictionary<long, List<Order>> ActiveBrackets = new ConcurrentDictionary<long, List<Order>>();
 
-            // Magics a los que hemos visto posicion viva alguna vez. Sin esto no
-            // se puede distinguir "la posicion ya cerro" de "la posicion aun no
-            // aparece en Account.Positions", que son el mismo sintoma a los pocos
-            // milisegundos de llenarse la entrada.
+            // Magics con posicion viva vista alguna vez ("ya cerro" vs "aun no llega").
             public readonly ConcurrentDictionary<long, byte> MagicConPosicion = new ConcurrentDictionary<long, byte>();
 
-            // Modo reactivo: cola de ordenes de terceros pendientes de gatear +
-            // set de las ya evaluadas (OnOrderUpdate dispara varias veces por
-            // orden). Worker propio para no bloquear el hilo de eventos de NT8
-            // con el SendAndWait del socket.
+            // Modo reactivo: cola de ordenes de terceros + set de las ya evaluadas.
+            // Worker propio: el SendAndWait no puede bloquear los eventos de NT8.
             public readonly BlockingCollection<Order> ReactiveQueue = new BlockingCollection<Order>(new ConcurrentQueue<Order>());
             public readonly ConcurrentDictionary<Order, byte> ReactiveSeen = new ConcurrentDictionary<Order, byte>();
             public Thread ReactiveThread;
@@ -319,14 +196,11 @@ namespace NinjaTrader.NinjaScript.AddOns
             // Conexion propia por strategy (el magic del socket lo fija el LOGIN).
             public readonly ConcurrentDictionary<string, SocketConn> StrategyConns = new ConcurrentDictionary<string, SocketConn>();
 
-            // Delegados guardados para poder DESuscribir exactamente lo que se
-            // suscribio: los handlers llevan el link capturado, asi que "-=" con
-            // una lambda nueva no quitaria nada.
+            // Guardados para poder DESuscribir: los handlers capturan el link.
             public EventHandler<OrderEventArgs> OrderHandler;
             public EventHandler<ExecutionEventArgs> ExecutionHandler;
 
-            // Ultimo bloque de posiciones enviado en STATE. Solo para trazar los
-            // CAMBIOS: STATE sale cada 2 s y registrarlo entero seria ilegible.
+            // Ultimo STATE enviado, solo para trazar los CAMBIOS.
             public string LastPositionsCsv = null;
         }
 
@@ -378,12 +252,8 @@ namespace NinjaTrader.NinjaScript.AddOns
 
         // ------------------------- altas y bajas de cuentas -------------------------
 
-        /// <summary>Cuentas que hay que puentear ahora mismo.
-        ///
-        /// AccountNames vacio = todas las conectadas. NinjaTrader conecta cuentas
-        /// cuando le da la gana (el usuario abre la conexion despues de arrancar),
-        /// asi que esto se re-evalua periodicamente en AccountScanLoop y no una
-        /// sola vez al arrancar.</summary>
+        /// <summary>Cuentas a puentear ahora mismo. Se re-evalua periodicamente:
+        /// NinjaTrader conecta cuentas cuando le da la gana.</summary>
         private List<Account> WantedAccounts()
         {
             var wanted = new List<Account>();
@@ -417,8 +287,7 @@ namespace NinjaTrader.NinjaScript.AddOns
             }
         }
 
-        /// <summary>Pone los links al dia con las cuentas de NinjaTrader: da de alta
-        /// las nuevas y de baja las que ya no estan.</summary>
+        /// <summary>Alta de las cuentas nuevas y baja de las que ya no estan.</summary>
         private void SyncAccounts()
         {
             var wanted = WantedAccounts();
@@ -457,14 +326,12 @@ namespace NinjaTrader.NinjaScript.AddOns
             link.Conn = new SocketConn(ServerHost, ServerPort, link.TerminalId, link.AccountName,
                                        GetOrAssignMagic("__BRIDGE__"), s => OnPush(link, s), LogFunc);
 
-            // El feed lo sirve UNA cuenta (ver cabecera). La primera que arranca.
+            // El feed lo sirve UNA cuenta: la primera que arranca.
             if (_dataLink == null)
             {
                 _dataLink = link;
-                // La app es la duena de que se comparte: al (re)conectar soltamos
-                // todo y esperamos a que nos lo vuelva a pedir (ver StopAllStreams).
-                // Solo en la cuenta del feed: la reconexion de OTRA cuenta no debe
-                // tirar las suscripciones de mercado.
+                // La duena de que se comparte es la app: al (re)conectar soltamos
+                // todo y esperamos a que nos lo vuelva a pedir.
                 link.Conn.OnLoggedIn = StopAllStreams;
             }
 
@@ -502,11 +369,8 @@ namespace NinjaTrader.NinjaScript.AddOns
             link.StrategyConns.Clear();
         }
 
-        /// <summary>La cuenta que servia el feed se fue: se asciende otra.
-        ///
-        /// Las suscripciones vivas apuntaban a un socket cerrado, asi que se sueltan
-        /// y se avisa: la app las vuelve a pedir en la siguiente reconexion de la
-        /// cuenta que ahora sirve el feed.</summary>
+        /// <summary>La cuenta que servia el feed se fue: se asciende otra y se
+        /// sueltan las suscripciones, que apuntaban a un socket cerrado.</summary>
         private void PromoteDataLink()
         {
             var next = _links.Values.FirstOrDefault();
@@ -534,15 +398,10 @@ namespace NinjaTrader.NinjaScript.AddOns
             catch (Exception ex) { Log("AutomaticTradingNT8: error suscribiendo cuenta '" + link.AccountName + "': " + ex.Message, LogLevel.Error); }
         }
 
-        /// <summary>Reconstruye magic &lt;-&gt; instrumento leyendo las ordenes de la cuenta.
-        ///
-        /// _magicToInstrument vive en memoria y se pierde al reiniciar/recompilar el
-        /// AddOn. Sin esto, un CMD_CLOSE posterior no encuentra el magic, retorna en
-        /// silencio y la posicion copiada se queda ABIERTA para siempre.
-        ///
-        /// Las ordenes que coloca el puente llevan el tag "ATP_&lt;magic&gt;", asi que la
-        /// asociacion se recupera de la propia cuenta, sin persistir nada.
-        /// </summary>
+        /// <summary>Reconstruye magic &lt;-&gt; instrumento leyendo las ordenes de la
+        /// cuenta (llevan el nombre "ATP_&lt;magic&gt;"). Los mapas viven en memoria; sin
+        /// esto, tras reiniciar el AddOn un CMD_CLOSE no encuentra el magic y la
+        /// copia se queda ABIERTA para siempre.</summary>
         private void RebuildMagicMapFromOrders(AccountLink link)
         {
             if (link == null || link.Account == null) return;
@@ -581,9 +440,7 @@ namespace NinjaTrader.NinjaScript.AddOns
             try { if (link.ExecutionHandler != null) link.Account.ExecutionUpdate -= link.ExecutionHandler; } catch { }
         }
 
-        // Bucle dueño de la conexion "bridge": conecta con backoff, y mientras
-        // esta conectada manda PING+STATE periodicos. Un socket muerto NO debe
-        // bloquear reintentos (gotcha guia #4.5).
+        // Conexion "bridge" de una cuenta: reconecta con backoff y manda PING+STATE.
         private void BridgeLoop(AccountLink link)
         {
             int failCount = 0;
@@ -617,9 +474,7 @@ namespace NinjaTrader.NinjaScript.AddOns
             }
         }
 
-        // Mensajes que llegan por push (no son respuesta a un SendAndWait):
-        // CMD_OPEN/CMD_CLOSE/CMD_UPDATE_SLTP y los comandos de feed. `link` es la
-        // cuenta por cuya conexion entro el comando.
+        // Comandos push. `link` es la cuenta por cuya conexion entro el comando.
         private void OnPush(AccountLink link, string line)
         {
             try { HandleCommand(link, line); }
@@ -634,15 +489,12 @@ namespace NinjaTrader.NinjaScript.AddOns
         // ------------------------- API publica (llamada desde Strategies) -------------------------
 
         /// <summary>
-        /// Gate de riesgo antes de abrir. type: 0=Buy, 1=Sell. barTime: NT8 no tiene
-        /// iTime() como MT5; pasar Time[0].Ticks o ToTime(Time[0]) desde la strategy.
-        /// priority: 0 = no ocupa el semaforo de turnos (igual que PreOpenCheck en MT5).
+        /// Gate de riesgo antes de abrir. type: 0=Buy, 1=Sell. barTime:
+        /// ToTime(Time[0]). priority: 0 = no ocupa el semaforo de turnos.
         ///
-        /// accountName: cuenta sobre la que opera la strategy. PASARLO SIEMPRE
-        /// (`Account.Name` dentro de una Strategy). Con varias cuentas puenteadas,
-        /// omitirlo gatea contra la cuenta del feed, y los limites (DD, lotes,
-        /// margen) de ESA cuenta no son los de la que va a recibir la orden.
-        /// El parametro es opcional solo para no romper las strategies ya escritas.
+        /// accountName: PASARLO SIEMPRE (`Account.Name`). Con varias cuentas
+        /// puenteadas, omitirlo gatea contra la cuenta del feed y sus limites no son
+        /// los de la que va a recibir la orden.
         /// </summary>
         public static bool CheckTrade(string strategyTag, double lots, int type, long barTime, int priority, out int magic, out string reason, string accountName = null)
         {
@@ -659,8 +511,8 @@ namespace NinjaTrader.NinjaScript.AddOns
             if (inst != null) inst.ReleaseInternal(strategyTag, accountName);
         }
 
-        /// <summary>Nombre/señal de entrada a usar en EnterLong/EnterShort para que STATE
-        /// pueda asociar la posicion resultante a este magic sintetico.</summary>
+        /// <summary>Nombre de entrada a usar en EnterLong/EnterShort para que STATE
+        /// pueda asociar la posicion a este magic.</summary>
         public static string OrderTag(string strategyTag, int magic)
         {
             return "ATP_" + magic;
@@ -685,8 +537,7 @@ namespace NinjaTrader.NinjaScript.AddOns
             var link = LinkFor(accountName);
             if (link == null) { reason = "no_account"; return true; }  // fail-open: sin puente, como si el AddOn no estuviera
 
-            // magicLocal (no el parametro `out magic`) porque C# prohibe capturar
-            // parametros ref/out en una lambda (CS1628).
+            // magicLocal y no `out magic`: C# no deja capturarlo en una lambda (CS1628).
             var conn = link.StrategyConns.GetOrAdd(strategyTag, _ =>
                 new SocketConn(ServerHost, ServerPort, link.TerminalId, link.AccountName, magicLocal, s => OnPush(link, s), LogFunc));
 
@@ -717,9 +568,9 @@ namespace NinjaTrader.NinjaScript.AddOns
                 conn.SendRaw("RELEASE|" + magic);
         }
 
-        /// <summary>Magic determinista a partir del nombre. FNV-1a 32 bits.
-        /// Debe dar EXACTAMENTE el mismo numero que nt8_manager.strategy_magic()
-        /// en Python (hay un test que lo comprueba).</summary>
+        /// <summary>Magic determinista a partir del nombre (FNV-1a 32 bits). Debe
+        /// dar el MISMO numero que nt8_manager.strategy_magic() en Python: hay un
+        /// test que lo comprueba.</summary>
         private static int GetOrAssignMagic(string strategyTag)
         {
             uint h = 2166136261u;
@@ -754,21 +605,13 @@ namespace NinjaTrader.NinjaScript.AddOns
                 {
                     if (!first) sb.Append(';');
                     first = false;
-                    // Simbolo RAIZ (roll-stable): "MNQ", no "MNQ 09-26". Asi las
-                    // reglas de copia y los mapeos no se rompen al rolar de
-                    // contrato. Las ordenes se ejecutan resolviendo el frontal.
+                    // Simbolo RAIZ (roll-stable): "MNQ", no "MNQ 09-26".
                     CacheInstrument(p.Instrument);
                     string instrKey = RootSymbol(p.Instrument);
                     long magic;
                     if (!link.InstrumentToMagic.TryGetValue(instrKey, out magic)) magic = 0;
-                    // "ticket" sintetico: NT8 netea por instrumento, no hay id de posicion
-                    // estable como el ticket de MT5. Determinista para un mismo
-                    // (instrumento, magic) — ver limitacion de netting en la cabecera.
-                    //
-                    // SIEMPRE POSITIVO: al copiar NT8 -> MT5 este ticket viaja como
-                    // `magic` de la posicion destino, y el magic de MT5 es ulong. Un
-                    // valor negativo (GetHashCode devuelve int con signo) seria
-                    // invalido para order_send.
+                    // "ticket" sintetico: NT8 netea y no hay id de posicion estable.
+                    // SIEMPRE POSITIVO: viaja como `magic` a MT5, que es ulong.
                     int ticket = (int)(unchecked(instrKey.GetHashCode() ^ (magic * 397)) & 0x7FFFFFFF);
                     if (ticket == 0) ticket = 1;   // 0 esta reservado a "sin magic"
                     if (magic != 0)
@@ -780,9 +623,8 @@ namespace NinjaTrader.NinjaScript.AddOns
                     double unrealized = 0;
                     try { unrealized = p.GetUnrealizedProfitLoss(PerformanceUnit.Currency); } catch { }
 
-                    // SL/TP: en NinjaTrader NO son campos de la posicion, son
-                    // ORDENES CONTRARIAS vivas en el libro. Se derivan de ellas
-                    // para que MetaTrader pueda copiarlas a sus campos sl/tp.
+                    // El SL/TP no es un campo de la posicion: son ORDENES contrarias
+                    // vivas. Se derivan de ellas para que MT5 pueda copiarlas.
                     double slPrice = 0, tpPrice = 0;
                     FindProtectiveOrders(link, p, out slPrice, out tpPrice);
 
@@ -792,17 +634,12 @@ namespace NinjaTrader.NinjaScript.AddOns
                       .Append(Num(unrealized)).Append(':').Append(magic);
                 }
 
-                // El bracket tiene que parecerse a la posicion: ni sobrar cuando
-                // ya no hay nada, ni cubrir mas contratos de los que quedan. Va
-                // aqui, sobre el estado, y no colgando de cada camino de cierre:
-                // la reconciliacion aplana y recorta con ordenes A MERCADO y no
-                // pasa ni por ExecuteClose ni por ExecuteClosePartial.
+                // El bracket tiene que parecerse a la posicion. Va sobre el ESTADO y
+                // no colgando de cada cierre: la reconciliacion aplana con ordenes a
+                // mercado y no pasa por ExecuteClose.
                 SyncBracketsToPositions(link, qtyPorMagic);
 
-                // Que posiciones se estan mandando, cuando cambian. Sin esto, "la
-                // aplicacion no ve mis operaciones" no distingue entre que NT8 no
-                // las reporte, que lleguen con otro nombre de instrumento o que el
-                // motor las descarte: los tres se ven igual desde fuera.
+                // Que posiciones se mandan, solo cuando cambian.
                 string posCsv = sb.ToString();
                 int corte = posCsv.IndexOf('|');
                 for (int i = 0; i < 4 && corte >= 0; i++) corte = posCsv.IndexOf('|', corte + 1);
@@ -828,20 +665,16 @@ namespace NinjaTrader.NinjaScript.AddOns
 
         // ------------------------- eventos de cuenta -------------------------
 
-        // El bracket SL/TP se coloca en OnOrderUpdate cuando OrderState==Filled,
-        // NUNCA en OnExecutionUpdate: la ejecucion puede llegar ANTES de que el
-        // estado pase a Filled, y el chequeo fallaria en silencio (gotcha real,
-        // dejo posiciones reales sin SL/TP en el proyecto hermano DMRI).
+        // El bracket se coloca aqui con OrderState==Filled, NUNCA en
+        // OnExecutionUpdate: la ejecucion puede llegar ANTES del Filled.
         private void OnOrderUpdate(AccountLink link, OrderEventArgs e)
         {
             try
             {
                 if (e == null || e.Order == null) return;
 
-                // Modo reactivo: encolar entradas de terceros (no ATP_) para
-                // gatearlas. Se hace en cuanto la orden es aceptada/trabajando,
-                // no solo al Filled, para tener la maxima ventana de cancelar
-                // antes de que llene. El worker decide (una vez por orden).
+                // Modo reactivo: encolar entradas de terceros (no ATP_) en cuanto la
+                // orden es aceptada, no solo al Filled: maxima ventana para cancelar.
                 if (ReactiveMode)
                 {
                     string nm = e.Order.Name ?? "";
@@ -854,10 +687,8 @@ namespace NinjaTrader.NinjaScript.AddOns
                     }
                 }
 
-                // Confirmar al motor en cuanto el BROKER se pronuncia sobre una
-                // contraria nuestra. Es el unico momento en que se sabe de
-                // verdad; hasta ahora el motor lo deducia del STATE siguiente,
-                // de hasta 2 s despues, y mientras reenviaba la misma orden.
+                // Confirmar en cuanto el BROKER se pronuncia sobre una contraria
+                // nuestra: antes se deducia del STATE siguiente, hasta 2 s despues.
                 if (e.OrderState == OrderState.Working || e.OrderState == OrderState.Rejected)
                     SendSlTpAck(link, e.Order);
 
@@ -894,9 +725,7 @@ namespace NinjaTrader.NinjaScript.AddOns
             double lots = o.Quantity;
             long barTime = DateTime.Now.Ticks;
 
-            // priority=0: no ocupa el semaforo de turnos, solo valida gates
-            // globales + limites (DD/lotes/margen/emergencia/deshabilitado),
-            // igual que el PreOpenCheck del EA MT5.
+            // priority=0: solo gates globales y limites, sin semaforo de turnos.
             string resp = "ALLOW";
             if (link.Conn != null && link.Conn.IsLoggedIn)
             {
@@ -925,17 +754,14 @@ namespace NinjaTrader.NinjaScript.AddOns
         {
             try
             {
-                // 1) Si la orden sigue viva, cancelarla (evita que llene).
-                //    Por EsOrdenViva y no por una lista de estados "buenos":
-                //    ChangeSubmitted y TriggerPending tambien son ordenes vivas y
-                //    quedaban fuera, asi que el gate no las paraba.
+                // 1) Si la orden sigue viva, cancelarla. Por EsOrdenViva, no por una
+                //    lista de estados "buenos".
                 if (EsOrdenViva(o))
                 {
                     link.Account.Cancel(new[] { o });
                 }
                 // 2) Si ya habia posicion (o lleno mientras ibamos), aplanarla.
-                //    NT8 netea por instrumento: esto cierra TODA la posicion del
-                //    instrumento (ver limitacion de netting en la cabecera).
+                //    NT8 netea: esto cierra TODA la posicion del instrumento.
                 var pos = link.Account.Positions.FirstOrDefault(p => p.Instrument == o.Instrument && p.MarketPosition != MarketPosition.Flat);
                 if (pos != null)
                 {
@@ -970,23 +796,11 @@ namespace NinjaTrader.NinjaScript.AddOns
             catch (Exception ex) { Log("AutomaticTradingNT8: OnExecutionUpdate: " + ex.Message, LogLevel.Error); }
         }
 
-        /// <summary>SL y TP equivalentes de una posicion NT8, derivados de sus
-        /// ordenes contrarias vivas.
-        ///
-        /// En NinjaTrader la proteccion no es un atributo de la posicion: para un
-        /// largo, el SL es una VENTA StopMarket/StopLimit y el TP una VENTA Limit
-        /// (al reves para un corto). Se clasifica por TIPO de orden, no por estar
-        /// por encima o por debajo de la entrada: un stop subido a break-even
-        /// queda por encima de la entrada y sigue siendo un stop.
-        ///
-        /// Solo cuentan las que cubren la posicion ENTERA. Una pendiente contraria
-        /// de menos cantidad es una toma PARCIAL, y eso no cabe en los campos
-        /// sl/tp de MetaTrader (cierran la posicion completa). No hace falta
-        /// traducirla: cuando llene, la cantidad de la posicion baja y el motor lo
-        /// copia como cierre parcial (ver signal_engine.volume_adjustment).
-        ///
-        /// Si hay varias candidatas se toma la mas cercana al precio: es la que
-        /// dispararia primero.</summary>
+        /// <summary>SL y TP equivalentes de una posicion, derivados de sus ordenes
+        /// contrarias vivas. Se clasifica por TIPO de orden, no por el lado de la
+        /// entrada. Solo cuentan las que cubren la posicion ENTERA: una menor es una
+        /// toma parcial y no cabe en los campos sl/tp de MT5. Con varias, la mas
+        /// cercana al precio.</summary>
         private void FindProtectiveOrders(AccountLink link, Position p, out double sl, out double tp)
         {
             sl = 0; tp = 0;
@@ -1026,18 +840,9 @@ namespace NinjaTrader.NinjaScript.AddOns
             catch (Exception ex) { Log("AutomaticTradingNT8: FindProtectiveOrders: " + ex.Message, LogLevel.Warning); }
         }
 
-        /// <summary>True si la orden sigue en juego (no ha terminado).
-        ///
-        /// NO se pregunta por Working/Accepted: entre esos dos hay estados
-        /// TRANSITORIOS — ChangeSubmitted, CancelSubmitted, Submitted — y tratar
-        /// uno de ellos como "orden muerta" costo caro el 2026-08-26. Al
-        /// redimensionar un bracket, sus dos piernas pasaron por ChangeSubmitted,
-        /// se borraron del registro, ExecuteUpdateSlTp no encontro bracket y
-        /// coloco OTRO par: cuatro contrarias sobre dos contratos, y las dos
-        /// primeras fuera del registro y por tanto fuera del alcance de la
-        /// barredera. Se quedaron vivas con la posicion ya plana.
-        ///
-        /// Se pregunta al reves: solo esta muerta la que llego a un estado FINAL.</summary>
+        /// <summary>True si la orden sigue en juego. NO se pregunta por
+        /// Working/Accepted: entre esos dos hay estados TRANSITORIOS. Se pregunta al
+        /// reves, solo esta muerta la que llego a un estado FINAL.</summary>
         private static bool EsOrdenViva(Order o)
         {
             if (o == null) return false;
@@ -1047,26 +852,12 @@ namespace NinjaTrader.NinjaScript.AddOns
                 && o.OrderState != OrderState.Unknown;
         }
 
-        /// <summary>Deja las contrarias como esta la posicion: las de una posicion
-        /// plana se cancelan, y las de una viva se ajustan a su cantidad.
+        /// <summary>Deja las contrarias como esta la posicion: las de una plana se
+        /// cancelan, las de una viva se ajustan a su cantidad. Una Stop huerfana ABRE
+        /// posicion en sentido contrario si el precio la toca.
         ///
-        /// En NinjaTrader un SL/TP es una ORDEN en el libro, no un campo de la
-        /// posicion: cuando la posicion desaparece, la orden NO se va con ella.
-        /// Una Stop huerfana no es inofensiva — si el precio la toca, ABRE una
-        /// posicion en sentido contrario que nadie pidio. Visto en vivo el
-        /// 2026-08-26: la reconciliacion aplano con dos ordenes a mercado y las
-        /// dos piernas del bracket siguieron trabajando.
-        ///
-        /// Se resuelve con NUESTRA asociacion (ActiveBrackets), no leyendo
-        /// nombres ni dando margenes de tiempo: sabemos que ordenes pusimos y
-        /// para que magic. Y solo se barre un magic al que hemos VISTO posicion
-        /// viva antes, que es lo que distingue "ya cerro" de "aun no aparece en
-        /// Account.Positions" — el mismo sintoma en los milisegundos siguientes a
-        /// llenarse la entrada.
-        ///
-        /// Va en el bucle de STATE y no en ExecuteClose porque la reconciliacion
-        /// aplana con ordenes a mercado y nunca pasa por ExecuteClose: la guarda
-        /// tiene que estar donde convergen todos los caminos, que es el estado.</summary>
+        /// Va en el bucle de STATE y no en ExecuteClose: la reconciliacion aplana con
+        /// ordenes a mercado y no pasa por ahi.</summary>
         private void SyncBracketsToPositions(AccountLink link, Dictionary<long, int> qtyPorMagic)
         {
             if (link == null || link.Account == null) return;
@@ -1109,16 +900,8 @@ namespace NinjaTrader.NinjaScript.AddOns
             }
         }
 
-        /// <summary>Dice al motor que niveles tiene AHORA el bracket de ese magic.
-        ///
-        /// `Account.Change` no devuelve nada: la respuesta del broker llega por
-        /// OnOrderUpdate, cuando la orden pasa a Working con los valores nuevos o
-        /// la rechaza. Eso es una confirmacion de verdad — "ya esta puesto" — y no
-        /// un "se lo he pedido", que es lo unico que se podia decir antes de
-        /// mirar el libro.
-        ///
-        /// Se manda el PAR entero (sl y tp), no la pierna que cambio: el motor
-        /// compara los dos a la vez, igual que los pide.</summary>
+        /// <summary>Dice al motor que niveles tiene AHORA el bracket. Se manda el PAR
+        /// entero, no la pierna que cambio.</summary>
         private void SendSlTpAck(AccountLink link, Order o)
         {
             try
@@ -1155,17 +938,8 @@ namespace NinjaTrader.NinjaScript.AddOns
             catch (Exception ex) { Log("AutomaticTradingNT8: SendSlTpAck: " + ex.Message, LogLevel.Warning); }
         }
 
-        /// <summary>Recupera en el registro las contrarias que sobrevivieron a un
-        /// reinicio del AddOn.
-        ///
-        /// ActiveBrackets vive en memoria: recompilar el AddOn (o reiniciar
-        /// NinjaTrader) la vacia, pero las ordenes siguen vivas en el broker. Sin
-        /// readoptarlas quedan fuera del grupo — ni se cancelan al cerrar la
-        /// posicion ni se ajustan al cambiar de tamaño — y son exactamente el
-        /// tipo de orden suelta que abre posicion en contra si el precio la toca.
-        ///
-        /// Para esto lleva el magic dentro del nombre (ver BracketName): es la
-        /// unica pista que sobrevive al reinicio.</summary>
+        /// <summary>Readopta las contrarias que sobrevivieron a un reinicio del
+        /// AddOn: ActiveBrackets vive en memoria, las ordenes no.</summary>
         private void AdoptOrphanBrackets(AccountLink link)
         {
             foreach (var o in link.Account.Orders.ToList())
@@ -1186,34 +960,17 @@ namespace NinjaTrader.NinjaScript.AddOns
                 }
                 if (!nueva) continue;
 
-                // Se marca SIEMPRE, tenga posicion ahora o no. Marcar solo cuando la
-                // hay dejaba a la readoptada fuera del alcance de la barredera —
-                // el mismo agujero que venia a tapar.
-                //
-                // El riesgo de marcar de mas es cancelar el bracket de una
-                // posicion que este arrancando y aun no figure en
-                // Account.Positions. Se asume a proposito porque ese error SE
-                // CURA SOLO: el motor ve la copia sin niveles y manda otra vez
-                // CMD_UPDATE_SLTP. Dejar viva una contraria sin posicion detras no
-                // se cura nunca, y abre posicion en contra si el precio la toca.
+                // Se marca SIEMPRE, tenga posicion ahora o no. Marcar de mas se cura
+                // solo (el motor reenvia CMD_UPDATE_SLTP); una contraria viva sin
+                // posicion detras no se cura nunca.
                 link.MagicConPosicion[magic] = 1;
                 Log("AutomaticTradingNT8: magic=" + magic + ": contraria recuperada tras reinicio (" +
                     o.OrderType + " " + o.Quantity + ").", LogLevel.Information);
             }
         }
 
-        /// <summary>Ajusta la cantidad de las contrarias a la de la posicion.
-        ///
-        /// Un bracket que cubre MENOS contratos de los que hay deja parte de la
-        /// posicion desnuda. Uno que cubre MAS es peor: al saltar vende mas de lo
-        /// que se tiene y ABRE posicion en sentido contrario.
-        ///
-        /// Hasta el 2026-08-26 esto solo se corregia de refilon — al ampliar,
-        /// dentro de ExecuteUpdateSlTp, y al recortar, dentro de
-        /// ExecuteClosePartial. Los dos dependen de que alguien mande un comando:
-        /// la reconciliacion recorta con una orden a mercado y no manda ninguno,
-        /// asi que una posicion de 2 que bajaba a 1 se quedaba con bracket de 2.
-        /// Visto en vivo. Por eso se comprueba contra el ESTADO en cada pasada.</summary>
+        /// <summary>Ajusta la cantidad de las contrarias a la de la posicion. Si
+        /// cubren MAS de lo que hay, al saltar abren posicion contraria.</summary>
         private void ResizeBracket(AccountLink link, long magic, int qtyPos)
         {
             if (qtyPos <= 0) return;
@@ -1247,8 +1004,7 @@ namespace NinjaTrader.NinjaScript.AddOns
             {
                 string instrKey;
                 if (!link.MagicToInstrument.TryGetValue(magic, out instrKey)) return res;
-                // El registro propio primero: mientras el AddOn corre, sabemos
-                // exactamente que ordenes pusimos para este magic.
+                // El registro propio primero: es exacto mientras el AddOn corre.
                 List<Order> anotadas;
                 if (link.ActiveBrackets.TryGetValue(magic, out anotadas))
                 {
@@ -1261,17 +1017,12 @@ namespace NinjaTrader.NinjaScript.AddOns
                     if (res.Count > 0) return res;
                 }
 
-                // Sin registro (el AddOn se reinicio y las ordenes siguen vivas en
-                // el broker): se reconocen por el nombre, que para eso lleva el
-                // magic dentro.
+                // Sin registro (AddOn reiniciado): por el nombre, que lleva el magic.
                 foreach (var o in link.Account.Orders.ToList())
                 {
                     if (o == null || o.Instrument == null) continue;
                     if (!EsOrdenViva(o)) continue;
-                    // Por nombre CON magic. Se acepta tambien el nombre viejo
-                    // ("ATP_bracket" a secas) para no dejar huerfano un bracket
-                    // colocado por una version anterior del AddOn: mejor poder
-                    // moverlo y cancelarlo que ignorarlo.
+                    // Se acepta el nombre viejo ("ATP_bracket" a secas) de otra version.
                     bool mio = string.Equals(o.Name, BracketName(magic), StringComparison.Ordinal)
                                || string.Equals(o.Name, "ATP_bracket", StringComparison.Ordinal);
                     if (!mio) continue;
@@ -1283,16 +1034,9 @@ namespace NinjaTrader.NinjaScript.AddOns
             return res;
         }
 
-        /// <summary>Ajusta un precio al tick del instrumento.
-        ///
-        /// Los niveles llegan de MetaTrader traducidos por proporcion, asi que
-        /// salen con decimales arbitrarios (29229.89955022) que no son multiplos
-        /// del tick de MNQ (0.25). `CreateOrder` redondea solo al enviar, pero
-        /// asi el precio que registramos en el log y el que reporta el STATE son
-        /// exactamente el que va a tener la orden.
-        ///
-        /// (Nota: el fallo de "el stop no se movia" NO era el redondeo — era usar
-        /// StopPrice en vez de StopPriceChanged. Ver ExecuteUpdateSlTp.)</summary>
+        /// <summary>Ajusta un precio al tick. Los niveles llegan traducidos por
+        /// proporcion y Account.Change descarta EN SILENCIO lo que no sea multiplo
+        /// del tick.</summary>
         private static double RoundToTick(NinjaTrader.Cbi.Instrument instr, double price)
         {
             if (instr == null || price <= 0) return price;
@@ -1318,14 +1062,11 @@ namespace NinjaTrader.NinjaScript.AddOns
                 string oco = !string.IsNullOrEmpty(ocoExistente)
                     ? ocoExistente
                     : "ATP_OCO_" + Guid.NewGuid().ToString("N").Substring(0, 8);
-                // El nombre lleva el magic para que la asociacion posicion<->
-                // contrarias sea EXACTA. Con "ATP_bracket" a secas, el filtro solo
-                // podia ser por instrumento y dos copias de magics distintos sobre
-                // el mismo instrumento se pisaban.
+                // El nombre lleva el magic: si no, dos copias sobre el mismo
+                // instrumento se pisan.
                 string nombre = BracketName(b.Magic);
                 var children = new System.Collections.Generic.List<Order>();
-                // Al tick tambien aqui: CreateOrder redondea al enviar, pero asi el
-                // precio que registramos es el mismo que va a tener la orden.
+                // Al tick tambien aqui: el precio que registramos es el que tendra.
                 double sl = RoundToTick(b.Instrument, b.Sl);
                 double tp = RoundToTick(b.Instrument, b.Tp);
                 if (sl > 0)
@@ -1339,8 +1080,7 @@ namespace NinjaTrader.NinjaScript.AddOns
                 if (children.Count > 0)
                 {
                     link.Account.Submit(children.ToArray());
-                    // Anotar ANTES de que nadie pregunte: es la asociacion que
-                    // convierte "una Stop suelta" en "el stop de ESTA posicion".
+                    // Anotar ANTES de que nadie pregunte: es la asociacion.
                     link.ActiveBrackets.AddOrUpdate(b.Magic,
                         _ => new List<Order>(children),
                         (_, previas) => { lock (previas) { previas.AddRange(children); } return previas; });
@@ -1350,13 +1090,11 @@ namespace NinjaTrader.NinjaScript.AddOns
         }
 
         // ------------------------- comandos push (CMD_OPEN/CMD_CLOSE/CMD_UPDATE_SLTP) -------------------------
-        // Destino de copia de señales MT5->NT8: server->NT8, ejecutado por el AddOn
-        // directamente sobre la cuenta (no requiere ninguna Strategy activa).
-
-        // Los CMD_ de cuenta (OPEN/CLOSE/UPDATE_SLTP/FLATTEN) actuan sobre `link`,
-        // la cuenta por cuya conexion llegaron. Los de mercado (STREAM/HISTORY/
-        // PROFILE/DEPTH) no son de ninguna cuenta: se atienden una sola vez y su
-        // respuesta sale por DataConn (ver cabecera del archivo).
+        // Destino de copia de senales MT5->NT8: el AddOn actua sobre la cuenta, sin
+        // necesidad de ninguna Strategy activa.
+        //
+        // Los CMD_ de cuenta actuan sobre `link`, la cuenta por cuya conexion
+        // llegaron. Los de mercado responden por DataConn.
         private void HandleCommand(AccountLink link, string line)
         {
             var parts = line.Split('|');
@@ -1426,10 +1164,8 @@ namespace NinjaTrader.NinjaScript.AddOns
             else if (cmd == "CMD_PROFILE" && parts.Length >= 3)
             {
                 // CMD_PROFILE|<sym>|<b0>,<b1>,...,<bN>
-                // Las N+1 marcas (UTC ms, ascendentes) son las FRONTERAS de las N
-                // velas del grafico de MT5. Se mandan explicitas y no como
-                // "desde + paso" porque las velas de MT5 no son uniformes: fines
-                // de semana, festivos y horario de verano abren huecos.
+                // Las N+1 marcas (UTC ms) son las FRONTERAS de las N velas de MT5.
+                // Explicitas: las velas de MT5 no son uniformes.
                 StartProfile(parts[1], parts[2]);
             }
             else if (cmd == "CMD_SYMBOLS")
@@ -1440,23 +1176,10 @@ namespace NinjaTrader.NinjaScript.AddOns
 
         // ------------------------- instrumentos disponibles (CMD_SYMBOLS) -------------------------
 
-        /// <summary>Responde SYMBOLS|&lt;raiz&gt;,&lt;raiz&gt;,... con los instrumentos que usa
-        /// este NinjaTrader.
-        ///
-        /// Lo pide la aplicacion para poder MAPEAR simbolos entre terminales: el
-        /// nombre de un instrumento no coincide entre plataformas (US100.cash en un
-        /// broker MT5 es MNQ aqui) y sin las dos listas el usuario tiene que
-        /// teclearlos de memoria.
-        ///
-        /// La fuente son las LISTAS DE INSTRUMENTOS del usuario (las de la ventana
-        /// de NinjaTrader), no la base de datos entera: esta trae miles de nombres
-        /// que nadie opera y no caben en un desplegable. Se completan con lo que
-        /// tenga posicion abierta y con lo ya resuelto en esta sesion. Se manda la
-        /// RAIZ ("MNQ", no "MNQ 09-26"), que es la que viaja en STATE y la que
-        /// sobrevive a los rolls.
-        ///
-        /// Va por la conexion de `link` y no por la del feed: la aplicacion guarda
-        /// la lista por terminal, y quien la pidio fue ese terminal.</summary>
+        /// <summary>Responde SYMBOLS|&lt;raiz&gt;,... para que la app pueda MAPEAR
+        /// simbolos entre terminales. La fuente son las LISTAS DE INSTRUMENTOS del
+        /// usuario, no la base de datos entera. Va por la conexion de `link`: la app
+        /// guarda la lista por terminal.</summary>
         private void SendSymbols(AccountLink link)
         {
             if (link == null || link.Conn == null || !link.Conn.IsLoggedIn) return;
@@ -1492,9 +1215,7 @@ namespace NinjaTrader.NinjaScript.AddOns
 
             foreach (var k in _rootCache.Keys) roots.Add(k);
 
-            // Sin listas configuradas no se manda la base de datos entera: seria un
-            // desplegable de miles de nombres. Mejor lista vacia y que el usuario
-            // escriba el instrumento a mano, que es lo que la aplicacion permite.
+            // Sin listas configuradas se manda vacio, no la base de datos entera.
             if (roots.Count == 0)
                 Log("AutomaticTradingNT8: CMD_SYMBOLS — no hay instrumentos en las listas de NinjaTrader. " +
                     "Añade los que operes a una lista (o abre posicion) para que aparezcan en el mapeo de la aplicacion.",
@@ -1502,8 +1223,7 @@ namespace NinjaTrader.NinjaScript.AddOns
 
             var names = roots.Take(SymbolsMax).ToArray();
             link.Conn.SendRaw("SYMBOLS|" + string.Join(",", names));
-            // Si alguna vez se toca el tope hay que DECIRLO: un truncado silencioso
-            // deja al usuario buscando en el mapeo un instrumento que nunca se mando.
+            // Tocar el tope hay que DECIRLO: truncar en silencio despista al usuario.
             if (roots.Count > names.Length)
                 Log("AutomaticTradingNT8: CMD_SYMBOLS — " + roots.Count + " instrumentos en las listas, " +
                     "se mandan los " + names.Length + " primeros por orden alfabetico. Reduce tus listas de " +
@@ -1514,14 +1234,10 @@ namespace NinjaTrader.NinjaScript.AddOns
 
         // ------------------------- historico de operaciones (CMD_HISTORY) -------------------------
 
-        // Pide a NT8 las ultimas N operaciones ejecutadas y las vuelca al puente como
-        // TRADE| normales. El agresor se reconstruye igual que en vivo (Lee-Ready):
-        // se piden TAMBIEN las series historicas de Bid y Ask y, para cada operacion,
-        // se compara su precio con la cotizacion vigente en ESE instante.
-        //
-        // Si el feed no sirve historico de bid/ask (depende del proveedor), se envia
-        // side=0 y el EA cae a la tick-rule (direccion del precio), que es lo que hace
-        // con cualquier CFD. Peor, pero no falso: no inventamos el agresor.
+        // Vuelca las ultimas N operaciones como TRADE|. El agresor se reconstruye
+        // igual que en vivo (Lee-Ready): se piden TAMBIEN las series de Bid y Ask
+        // para fechar cada operacion. Si el feed no las sirve, side=0 y el EA cae a
+        // la tick-rule.
         private void StartHistory(string symbol, int nTicks, long fromMs)
         {
             var instr = ResolveInstrument(symbol);
@@ -1567,12 +1283,9 @@ namespace NinjaTrader.NinjaScript.AddOns
                     SendTradeHistory(instr, root, nTicks, fromMs, bidT, bidP, askT, askP)));
         }
 
-        // BarsRequest de ticks: por RANGO DE FECHAS si el EA manda una (pide por velas,
-        // que es lo que necesita), o por numero de ticks si no.
-        //
-        // OJO: MarketDataType va en BarsPeriod, NO en BarsRequest (que no tiene esa
-        // propiedad: da CS0117 'BarsRequest does not contain a definition for
-        // MarketDataType'). Y el constructor por fechas las toma en hora LOCAL.
+        // BarsRequest de ticks: por rango de fechas si el EA manda una, o por numero
+        // de ticks. OJO: MarketDataType va en BarsPeriod, NO en BarsRequest (CS0117),
+        // y el constructor por fechas las toma en hora LOCAL.
         private static BarsRequest NewTickRequest(NinjaTrader.Cbi.Instrument instr, int nTicks,
                                                   long fromMs, MarketDataType mdt)
         {
@@ -1659,10 +1372,8 @@ namespace NinjaTrader.NinjaScript.AddOns
                         int n = bars.Count;
                         int bi = 0, ai = 0;
 
-                        // Pedido por fechas: NT8 puede devolver muchisimos mas trades de
-                        // los que caben en memoria (100 velas M5 de MNQ son ~2,2M). Se
-                        // envian los MAS RECIENTES hasta el tope: son los que el EA va a
-                        // poder mostrar, y ademas los que sobrevivirian a la cola.
+                        // NT8 puede devolver muchos mas trades de los que caben en
+                        // memoria: se envian los MAS RECIENTES.
                         int first = (nTicks > 0 && n > nTicks) ? n - nTicks : 0;
                         if (first > 0)
                             Log("AutomaticTradingNT8: " + root + " — el rango pedido tiene " + n +
@@ -1706,11 +1417,8 @@ namespace NinjaTrader.NinjaScript.AddOns
                     {
                         if (r != null) r.Dispose();
                         FlushLiveQueue(root, lastTs);
-                        // Avisar de que el volcado ha terminado. Sin esto, el EA se cree
-                        // al dia en cuanto un sondeo le devuelve menos trades de los que
-                        // pidio, cosa que pasa SIEMPRE en los primeros segundos: NT8 tarda
-                        // ~1 min en servir el BarsRequest, asi que el EA haria el backfill
-                        // con los cuatro trades en vivo que hubiera y no lo repetiria.
+                        // Avisar del fin del volcado: sin esto el EA se cree al dia en
+                        // cuanto un sondeo le devuelve menos trades de los que pidio.
                         SendData("HISTORY_DONE|" + root);
                     }
                 });
@@ -1745,28 +1453,12 @@ namespace NinjaTrader.NinjaScript.AddOns
 
         // ------------------------- perfil agregado (CMD_PROFILE) -------------------------
         //
-        // POR QUE EXISTE ESTO, aparte del historico de ticks de arriba.
+        // No se mandan operaciones: se manda la ESCALERA ya agregada por vela. Una
+        // vela D1 son ~2400 niveles en vez de millones de trades, que es lo que el
+        // camino de ticks no puede servir. El agresor lo traen las barras Volumetric.
         //
-        // El camino de ticks manda CADA operacion por el socket. En MNQ son ~197k
-        // por hora, asi que el tope de 500k cubre unas 2,5 h. Para las 24 velas que
-        // pide el footprint eso llega hasta M6; de M10 para arriba el rango no cabe
-        // ni de lejos (24 velas D1 son 4 semanas, decenas de millones de trades).
-        // Y el intento de servirlo por ticks era peor que lento: las dos series de
-        // cotizacion (Bid y Ask suman 2,8 GB en disco solo para 26 dias) se cargaban
-        // ENTERAS en RAM antes de mandar nada.
-        //
-        // Aqui no se mandan operaciones: se manda la ESCALERA ya agregada por vela,
-        // que es lo que el footprint dibuja. Una vela D1 de MNQ son ~2400 niveles
-        // (~48 KB) en vez de millones de trades.
-        //
-        // Y el agresor no lo deducimos nosotros: lo pone NinjaTrader. Las barras
-        // Volumetric (Order Flow+) ya traen el reparto bid/ask por nivel, que es
-        // exactamente el trabajo para el que antes cargabamos Bid y Ask.
-        //
-        // DISCIPLINA DE MEMORIA (la leccion del atasco del 11-08-2026): se recorre
-        // en streaming. Los minutos entran en orden, se acumulan en el diccionario
-        // de la vela EN CURSO y al cruzar la frontera esa vela se emite y se libera.
-        // El pico de RAM es UNA escalera, no la serie entera. Nunca materializar.
+        // DISCIPLINA DE MEMORIA: se recorre en streaming, acumulando en la vela EN
+        // CURSO y liberando al cruzar la frontera. Nunca materializar la serie.
 
         // Raices con un perfil en vuelo. Sin esto, dos graficos pidiendo a la vez
         // lanzarian dos BarsRequest sobre lo mismo.
@@ -1819,16 +1511,9 @@ namespace NinjaTrader.NinjaScript.AddOns
             try
             {
                 // Resolucion MINUTO, igual que el "Order Flow Volume Profile" de NT8.
-                // El perfil no se construye desde ticks crudos: desde velas de un
-                // minuto ya volumetricas, que es de donde sale la velocidad.
-                //
-                // OJO (confirmar en la primera compilacion): en el BarsPeriod de
-                // Volumetric, 'Value' son las MARCAS POR NIVEL (el "Marcas por
-                // nivel" del dialogo, que dejamos en 1 = maxima resolucion) y el
-                // periodo base va en BaseBarsPeriodType/BaseBarsPeriodValue.
-                // Se deja en 1 a proposito: cuantizar aqui obligaria a repedir el
-                // perfil cada vez que el EA cambia su paso de celda (que se adapta
-                // al ATR y al zoom). Cuantiza el EA.
+                // En el BarsPeriod Volumetric, 'Value' son las MARCAS POR NIVEL y el
+                // periodo base va en BaseBarsPeriodType/Value. Se deja en 1: cuantiza
+                // el EA, que adapta su paso de celda al ATR y al zoom.
                 var period = new BarsPeriod
                 {
                     BarsPeriodType      = BarsPeriodType.Volumetric,
@@ -1958,8 +1643,7 @@ namespace NinjaTrader.NinjaScript.AddOns
             }
             SendData(sb.ToString());
 
-            // Misma cortesia que el volcado de ticks: una escalera D1 son ~48 KB y
-            // varias seguidas dejan a NT8 sin responder mientras escribe el socket.
+            // Una escalera D1 son ~48 KB: varias seguidas dejan a NT8 sin responder.
             Thread.Sleep(HistPauseMs);
             return true;
         }
@@ -1984,11 +1668,8 @@ namespace NinjaTrader.NinjaScript.AddOns
                 Log("AutomaticTradingNT8: CMD_STREAM — suscrito a " + root +
                     " (" + instr.FullName + "). Esperando datos del feed...", LogLevel.Information);
 
-                // Suscribirse SIEMPRE funciona, aunque el feed no vaya a mandar
-                // nada (instrumento sin datos en esta conexion, mercado cerrado,
-                // sin suscripcion de datos...). Decir "compartiendo" sin
-                // comprobarlo es mentir: el usuario espera ticks que no llegaran.
-                // A los 10 s se verifica y se avisa.
+                // Suscribirse SIEMPRE funciona, aunque el feed no vaya a mandar nada.
+                // Decir "compartiendo" sin comprobarlo es mentir: a los 10 s se mira.
                 var watchdog = new Thread(() =>
                 {
                     Thread.Sleep(10000);
@@ -2012,16 +1693,8 @@ namespace NinjaTrader.NinjaScript.AddOns
             catch (Exception ex) { Log("AutomaticTradingNT8: StartStream " + root + ": " + ex.Message, LogLevel.Warning); }
         }
 
-        // Suelta TODAS las suscripciones de ticks. Se llama al conectar con el puente:
-        // la DUENA del estado de compartir es la aplicacion, no el AddOn.
-        //
-        // Antes el AddOn mantenia la suscripcion por su cuenta y sobrevivia a que la
-        // app se reiniciara: NinjaTrader seguia enviando trades de un instrumento que
-        // la app ya no recordaba haber pedido, y que el usuario no podia parar (la
-        // tabla "Datos compartidos" salia vacia, sin fila que seleccionar).
-        //
-        // Ahora la app persiste lo que compartiste y vuelve a pedirlo en cuanto el
-        // AddOn hace LOGIN (ver main._on_new_terminal), asi que no se pierde nada.
+        // Suelta TODAS las suscripciones de ticks al conectar: la duena del estado de
+        // compartir es la aplicacion, que las vuelve a pedir tras el LOGIN.
         private void StopAllStreams()
         {
             int n = 0;
@@ -2060,23 +1733,19 @@ namespace NinjaTrader.NinjaScript.AddOns
                 double bid = md != null && md.Bid != null ? md.Bid.Price : 0;
                 double ask = md != null && md.Ask != null ? md.Ask.Price : 0;
 
-                // Diagnostico: que tipos de dato manda REALMENTE este instrumento.
-                // Si nunca llega un 'Last', no hay cinta de operaciones y el
-                // footprint real es imposible con el (pasa con muchos CFD/spot:
-                // solo cotizan bid/ask, no publican las operaciones ejecutadas).
+                // Diagnostico: si nunca llega un 'Last' no hay cinta de operaciones y
+                // el footprint real es imposible con ese instrumento.
                 if (_mdSeen.TryAdd(root + "|" + e.MarketDataType, 0))
                     Log("AutomaticTradingNT8: " + root + " -> primer dato de tipo " +
                         e.MarketDataType + " (precio=" + Num(e.Price) + " vol=" + Num(e.Volume) + ")",
                         LogLevel.Information);
 
-                // --- TRADE: una operacion EJECUTADA (MarketDataType.Last). Es el
-                //     dato que hace REAL un footprint: precio, VOLUMEN negociado y
-                //     lado agresor. SIN THROTTLE: hacen falta todos, no una muestra.
+                // --- TRADE: operacion EJECUTADA. Es lo que hace REAL un footprint.
+                //     SIN THROTTLE: hacen falta todos, no una muestra.
                 if (e.MarketDataType == MarketDataType.Last)
                 {
                     // Agresor (Lee-Ready): aqui conocemos el bid/ask EXACTO del
-                    // instante del trade. Deducirlo despues, en MT5, por la
-                    // direccion del precio (tick-rule) es solo un proxy.
+                    // instante. Deducirlo luego en MT5 solo es un proxy.
                     int side = 0;
                     if (ask > 0 && e.Price >= ask) side = 1;        // paga el ask -> comprador agresor
                     else if (bid > 0 && e.Price <= bid) side = -1;  // pega al bid -> vendedor agresor
@@ -2085,9 +1754,7 @@ namespace NinjaTrader.NinjaScript.AddOns
                     string trade = "TRADE|" + root + "|" + tms + "|" + Num(e.Price) + "|" +
                                    Num(e.Volume) + "|" + Num(bid) + "|" + Num(ask) + "|" + side;
 
-                    // Volcado de historico en curso: retener. Mandarlo ahora lo pondria
-                    // por delante de operaciones mas antiguas y romperia el orden
-                    // cronologico del que depende el EA (ver _histQueue).
+                    // Volcado en curso: retener, o romperiamos el orden cronologico.
                     ConcurrentQueue<KeyValuePair<long, string>> hq;
                     if (_histQueue.TryGetValue(root, out hq) && hq != null)
                     {
@@ -2105,9 +1772,8 @@ namespace NinjaTrader.NinjaScript.AddOns
                     return;
                 }
 
-                // --- TICK: cotizacion (bid/ask). Sirve de referencia de precio
-                //     (GET_TICK), no para el footprint. Aqui SI se throttlea: un
-                //     cambio de bid/ask no aporta nada al order flow.
+                // --- TICK: cotizacion. Referencia de precio (GET_TICK), no order
+                //     flow: aqui SI se throttlea.
                 long now = DateTime.UtcNow.Ticks / TimeSpan.TicksPerMillisecond;
                 long lastSent;
                 if (_lastTickSentMs.TryGetValue(root, out lastSent) && now - lastSent < TickThrottleMs) return;
@@ -2158,33 +1824,16 @@ namespace NinjaTrader.NinjaScript.AddOns
                 NinjaTrader.Cbi.Instrument instr;
                 if (!_depthStreamed.TryGetValue(root, out instr) || instr == null) return;
 
-                // Throttle por raiz (L2 es alto volumen). Va ANTES de leer el
-                // libro: el libro lo mantiene NinjaTrader, no nosotros, asi que
-                // saltarse un evento no pierde nada — la siguiente lectura ya
-                // trae el estado actualizado.
+                // Throttle ANTES de leer el libro: lo mantiene NinjaTrader, asi que
+                // saltarse un evento no pierde nada.
                 long now = DateTime.UtcNow.Ticks / TimeSpan.TicksPerMillisecond;
                 long last;
                 if (_lastDepthSentMs.TryGetValue(root, out last) && now - last < DepthThrottleMs) return;
                 _lastDepthSentMs[root] = now;
 
-                // El libro se lee de NinjaTrader (MarketDepth.Bids/.Asks), NO de
-                // una copia propia.
-                //
-                // Manteniamos un SortedList por precio y lo actualizabamos con
-                // los eventos (Add/Update fijan tamano, Remove borra). Los niveles
-                // cuyo precio NT8 deja de reportar al alejarse el mercado NUNCA
-                // recibian su Remove y se quedaban dentro para siempre. Al
-                // serializar, Asks.Take(10) devolvia los 10 precios MAS BAJOS =
-                // los huerfanos del momento en que se activo el L2: el ask salia
-                // congelado horas, con el bid aparentemente sano (Bids.Reverse()
-                // toma los mas altos, y esos si eran reales). Verificado en vivo
-                // el 27-07-2026: bids siguiendo al mercado en 28722-28724 y asks
-                // clavados en 28706-28709 con los mismos tamanos durante 15 s.
-                //
-                // NT8 ya mantiene el libro correcto y lo expone ordenado
-                // (Bids[0] = mejor bid, Asks[0] = mejor ask), que es justo el
-                // orden del protocolo. Se lee bajo SyncMarketDepth, como hace el
-                // propio SuperDOM (ver SuperDomColumns/@APQ.cs).
+                // El libro se lee de NinjaTrader, NO de una copia propia (envejece: los
+                // niveles que deja de reportar no siempre traen su Remove). Ya viene
+                // ordenado, y se lee bajo SyncMarketDepth como hace el SuperDOM.
                 string bidsCsv, asksCsv;
                 lock (e.Instrument.SyncMarketDepth)
                 {
@@ -2199,22 +1848,15 @@ namespace NinjaTrader.NinjaScript.AddOns
             catch (Exception ex) { Log("AutomaticTradingNT8: OnMarketDepth: " + ex.Message, LogLevel.Warning); }
         }
 
-        // Aplana TODAS las posiciones de la cuenta (parada de emergencia /
-        // cerrar todas desde la app). Incluye las ATP_ propias: la emergencia
-        // debe cerrar TODO, sin excepciones.
+        // Aplana TODAS las posiciones (parada de emergencia). Incluye las ATP_
+        // propias: la emergencia cierra TODO, sin excepciones.
         private void FlattenAll(AccountLink link)
         {
             if (link == null || link.Account == null) return;
             try
             {
-                // 1) Cancelar PRIMERO las ordenes de trabajo (brackets SL/TP,
-                //    pendientes). Debe ir ANTES de crear el flatten: si se hace
-                //    despues, la propia orden de cierre (que pasa por Working)
-                //    se cancelaria a si misma (bug: la posicion no se cerraba).
-                //    Y por EsOrdenViva: con la lista de estados, un bracket que
-                //    estuviese en ChangeSubmitted en ese instante NO se cancelaba
-                //    y sobrevivia a la parada de emergencia — justo lo que no
-                //    puede pasar en el camino que existe para dejar todo a cero.
+                // 1) Cancelar PRIMERO las ordenes de trabajo: si se hace despues, la
+                //    propia orden de cierre se cancelaria a si misma.
                 var working = link.Account.Orders.Where(EsOrdenViva).ToList();
                 if (working.Count > 0) link.Account.Cancel(working.ToArray());
 
@@ -2241,8 +1883,7 @@ namespace NinjaTrader.NinjaScript.AddOns
         private void ExecuteOpen(AccountLink link, string symbol, int type, double volume, double sl, double tp, long magic)
         {
             if (link == null || link.Account == null) { Log("AutomaticTradingNT8: CMD_OPEN sin cuenta.", LogLevel.Warning); return; }
-            // symbol puede venir como raiz ("MNQ") o contrato completo: ResolveInstrument
-            // devuelve el frontal para la raiz.
+            // symbol puede venir como raiz o como contrato completo.
             var instrument = ResolveInstrument(symbol);
             if (instrument == null) { Log("AutomaticTradingNT8: CMD_OPEN instrumento no resuelto: " + symbol, LogLevel.Warning); return; }
 
@@ -2278,8 +1919,6 @@ namespace NinjaTrader.NinjaScript.AddOns
             if (!link.MagicToInstrument.TryGetValue(magic, out instrKey))
             {
                 // No callar: si el magic no se conoce, la copia se queda ABIERTA.
-                // Suele significar que el AddOn se reinicio y la orden original no
-                // aparece en Account.Orders (ver RebuildMagicMapFromOrders).
                 Log("AutomaticTradingNT8: CMD_CLOSE magic=" + magic + " desconocido en " + link.AccountName +
                     ": no se puede cerrar (posicion sin asociar).", LogLevel.Warning);
                 return;
@@ -2293,11 +1932,9 @@ namespace NinjaTrader.NinjaScript.AddOns
                         "): ya no hay posicion abierta.", LogLevel.Information);
                     return;
                 }
-                // PRIMERO cancelar el bracket, DESPUES aplanar. El OCO ata las dos
-                // ordenes ENTRE SI, no a la posicion: si la cierra una tercera orden
-                // — que es justo lo que hacemos aqui — las pendientes siguen vivas y
-                // la que salte ABRE POSICION EN SENTIDO CONTRARIO. NinjaTrader no las
-                // limpia solo.
+                // PRIMERO cancelar el bracket, DESPUES aplanar: el OCO ata las dos
+                // ordenes ENTRE SI, no a la posicion. Si la cierra una tercera, las
+                // pendientes siguen vivas y la que salte abre posicion contraria.
                 var brackets = FindBracketOrders(link, magic);
                 if (brackets.Count > 0)
                 {
@@ -2315,14 +1952,9 @@ namespace NinjaTrader.NinjaScript.AddOns
             catch (Exception ex) { Log("AutomaticTradingNT8: CMD_CLOSE error: " + ex.Message, LogLevel.Error); }
         }
 
-        /// <summary>Mueve (o crea) el bracket SL/TP de un magic.
-        ///
-        /// Usa Account.Change() sobre las ordenes vivas en vez de cancelar y
-        /// recolocar: cancelar deja una ventana sin proteccion, y si el submit
-        /// nuevo falla la posicion se queda desnuda.
-        ///
-        /// Si no hay bracket todavia (la posicion se abrio sin SL/TP y el emisor
-        /// los pone despues, que es el flujo manual normal) se coloca uno.</summary>
+        /// <summary>Mueve (o crea) el bracket SL/TP de un magic. Usa Account.Change
+        /// en vez de cancelar y recolocar: cancelar deja una ventana sin
+        /// proteccion.</summary>
         private void ExecuteUpdateSlTp(AccountLink link, long magic, double sl, double tp)
         {
             if (link == null || link.Account == null) return;
@@ -2339,30 +1971,21 @@ namespace NinjaTrader.NinjaScript.AddOns
                     p => RootSymbol(p.Instrument) == instrKey && p.MarketPosition != MarketPosition.Flat);
                 if (pos == null) return;
 
-                // AL TICK ANTES DE TOCAR NADA. Los niveles llegan traducidos por
-                // proporcion, con decimales que no son multiplos del tick, y
-                // Account.Change los descarta EN SILENCIO (ver RoundToTick).
+                // AL TICK ANTES DE TOCAR NADA: Account.Change descarta en silencio.
                 sl = RoundToTick(pos.Instrument, sl);
                 tp = RoundToTick(pos.Instrument, tp);
 
                 var existentes = FindBracketOrders(link, magic);
                 var cambiar = new System.Collections.Generic.List<Order>();
 
-                // La cantidad del bracket tiene que seguir a la posicion. Al
-                // AMPLIAR, NinjaTrader netea y la posicion pasa de 1 a 2, pero el
-                // bracket se quedaba en 1: un contrato desnudo. Y ademas
-                // FindProtectiveOrders descarta un bracket menor que la posicion
-                // ("o.Quantity < qty"), asi que el STATE reportaba 0:0 y el motor
-                // creia que NO habia ninguna proteccion, no que faltase media.
-                // Visto en vivo el 2026-08-26: posicion 2, bracket 1, STATE 0:0.
+                // La cantidad del bracket tiene que seguir a la posicion: al ampliar,
+                // NT8 netea y el bracket se quedaba corto (contratos desnudos), y
+                // FindProtectiveOrders lo descarta, asi que el STATE reportaba 0:0.
                 int qtyPos = Math.Abs(pos.Quantity);
                 // OJO: Account.Change NO lee StopPrice/LimitPrice, lee
-                // StopPriceChanged/LimitPriceChanged. Asignando la propiedad
-                // normal solo se muta el objeto LOCAL: NinjaTrader manda un
-                // cambio sin cambio (se ve "Change submitted -> Accepted ->
-                // Working" con el precio intacto) y, peor, FindProtectiveOrders
-                // lee ese objeto y reporta un nivel FANTASMA que en el broker no
-                // existe. Verificado en vivo el 2026-08-25.
+                // StopPriceChanged/LimitPriceChanged. Asignar la propiedad normal solo
+                // muta el objeto LOCAL y ademas hace que FindProtectiveOrders reporte
+                // un nivel FANTASMA.
                 var cancelar = new System.Collections.Generic.List<Order>();
                 bool haySl = false, hayTp = false;
                 string ocoVivo = null;
@@ -2372,11 +1995,8 @@ namespace NinjaTrader.NinjaScript.AddOns
                     bool esLimit = o.OrderType == OrderType.Limit;
                     if (!esStop && !esLimit) continue;
 
-                    // El emisor BORRO ese nivel: hay que cancelar la contraria, no
-                    // dejarla viva. Si no, quitar el TP en MetaTrader dejaba la
-                    // Limit trabajando en NinjaTrader, y al tocarla se cerraba la
-                    // copia mientras el emisor seguia dentro: cuentas divergentes
-                    // sin que nada lo dijera. Es el espejo del bracket huerfano.
+                    // El emisor BORRO ese nivel: cancelar la contraria. Si no, sigue
+                    // trabajando y cerraria la copia con el emisor aun dentro.
                     double objetivo = esStop ? sl : tp;
                     if (objetivo <= 0) { cancelar.Add(o); continue; }
 
@@ -2384,9 +2004,8 @@ namespace NinjaTrader.NinjaScript.AddOns
                     // grupo de una que acabamos de cancelar no ata nada.
                     if (!string.IsNullOrEmpty(o.Oco)) ocoVivo = o.Oco;
 
-                    // Precio y cantidad se miran por separado: al ampliar sin
-                    // mover el stop, el precio ya esta bien y solo falta crecer.
-                    // Con un unico `continue` por precio, ese caso no se tocaba.
+                    // Precio y cantidad por separado: al ampliar sin mover el stop, el
+                    // precio ya esta bien y solo falta crecer.
                     bool toca = false;
                     if (o.Quantity != qtyPos) { o.QuantityChanged = qtyPos; toca = true; }
 
@@ -2406,12 +2025,8 @@ namespace NinjaTrader.NinjaScript.AddOns
                 if (cancelar.Count > 0)
                 {
                     link.Account.Cancel(cancelar.ToArray());
-                    // CANCELAR UNA PIERNA MATA EL GRUPO OCO ENTERO — es lo que
-                    // significa "one cancels other". Verificado en vivo el
-                    // 2026-08-26: al cancelar la Limit, NinjaTrader cancelo
-                    // tambien la Stop Market. Asi que lo que el emisor SIGA
-                    // queriendo hay que recolocarlo con un OCO nuevo; darlo por
-                    // existente dejaba la posicion sin ninguna proteccion.
+                    // CANCELAR UNA PIERNA MATA EL GRUPO OCO ENTERO: lo que el emisor
+                    // SIGA queriendo hay que recolocarlo con un OCO nuevo.
                     haySl = false; hayTp = false; ocoVivo = null;
                     cambiar.Clear();   // esas ordenes ya no existen: no se pueden mover
                     Log("AutomaticTradingNT8: CMD_UPDATE_SLTP magic=" + magic + ": el emisor quito " +
@@ -2426,9 +2041,8 @@ namespace NinjaTrader.NinjaScript.AddOns
                         " TP=" + Num(tp) + " (" + cambiar.Count + " orden/es movidas)", LogLevel.Information);
                 }
 
-                // Piernas que el emisor quiere y todavia no existen. Se colocan
-                // reutilizando el OCO de las que ya estan, para que sigan
-                // atandose entre si (si una llena, la otra se cancela sola).
+                // Piernas que el emisor quiere y aun no existen. Reutilizan el OCO de
+                // las que ya estan.
                 double faltaSl = (sl > 0 && !haySl) ? sl : 0;
                 double faltaTp = (tp > 0 && !hayTp) ? tp : 0;
                 if (faltaSl <= 0 && faltaTp <= 0) return;
@@ -2448,12 +2062,8 @@ namespace NinjaTrader.NinjaScript.AddOns
             catch (Exception ex) { Log("AutomaticTradingNT8: CMD_UPDATE_SLTP error: " + ex.Message, LogLevel.Error); }
         }
 
-        /// <summary>Recorta `qty` contratos de la posicion de ese magic sin cerrarla.
-        ///
-        /// NT8 netea por instrumento, asi que una orden a mercado en sentido
-        /// contrario reduce la posicion. El bracket sobrante se ajusta a la
-        /// cantidad que queda: si no, protegeria mas contratos de los que hay y al
-        /// saltar abriria posicion en sentido contrario.</summary>
+        /// <summary>Recorta `qty` contratos sin cerrar la posicion. El bracket
+        /// sobrante se ajusta a lo que queda.</summary>
         private void ExecuteClosePartial(AccountLink link, long magic, double qty)
         {
             if (link == null || link.Account == null) return;
@@ -2501,11 +2111,9 @@ namespace NinjaTrader.NinjaScript.AddOns
         }
 
         /// <summary>Magic que llega en los CMD_. En la copia MT5 -&gt; NT8 el magic ES
-        /// el TICKET de la posicion origen, y los tickets de MT5 son `ulong`: ya se
-        /// han visto por encima de 2.147.483.647. Con `int` desbordaban todos al
-        /// mismo `int.MinValue`, dos copias distintas compartian entrada en
-        /// MagicToInstrument y un CMD_CLOSE cerraba la posicion equivocada. Por eso
-        /// `long` en todo el camino (mapas, tag ATP_, STATE).</summary>
+        /// el TICKET origen, y los de MT5 son `ulong`: con `int` desbordaban y un
+        /// CMD_CLOSE cerraba la posicion equivocada. Por eso `long` en todo el
+        /// camino.</summary>
         private static long ParseMagic(string s)
         {
             long v;
@@ -2531,9 +2139,7 @@ namespace NinjaTrader.NinjaScript.AddOns
             return instr.MasterInstrument != null ? instr.MasterInstrument.Name : instr.FullName;
         }
 
-        // Cache raiz -> instrumento ya resuelto. Se siembra con cada instrumento
-        // que vemos (posiciones, ejecuciones, streams), asi que tras la primera
-        // operacion la resolucion es inmediata.
+        // Cache raiz -> instrumento, sembrada con todo lo que vemos.
         private readonly ConcurrentDictionary<string, NinjaTrader.Cbi.Instrument> _rootCache =
             new ConcurrentDictionary<string, NinjaTrader.Cbi.Instrument>();
 
@@ -2544,31 +2150,13 @@ namespace NinjaTrader.NinjaScript.AddOns
             if (!string.IsNullOrEmpty(root)) _rootCache[root] = instr;
         }
 
-        /// <summary>Resuelve un symbol al Instrument de NT8.
+        /// <summary>Resuelve un symbol al Instrument de NT8: nombre completo
+        /// ("MNQ 09-26") o RAIZ ("MNQ").
         ///
-        /// Acepta el nombre completo ("MNQ 09-26") o la RAIZ ("MNQ").
-        ///
-        /// Con la raiz de un futuro hay dos trampas, las dos vistas en vivo el
-        /// 31-07-2026 con MGC:
-        ///
-        ///  a) El contrato que toca NO es el de vencimiento mas proximo, es el
-        ///     que marcan los roll settings de NT8. MGC AUG26 no habia expirado
-        ///     (vence a finales de agosto) pero ya estaba en periodo de aviso:
-        ///     cero operaciones en una hora de streaming y 135 en todo el
-        ///     historico, mientras NT8 graficaba MGC DEC26. El oro cotiza casi
-        ///     todos los meses y rueda mucho antes de expirar; en MNQ, que solo
-        ///     lista trimestrales, "el que vence antes" y "el activo" coinciden
-        ///     y por eso no se noto nunca.
-        ///
-        ///  b) Instrument.GetInstrument("MGC") NO devuelve null: devuelve la
-        ///     ACCION MGC, que existe con ese nombre exacto y no esta en el feed
-        ///     ('Symbol is inaccessible'). Por eso el futuro se resuelve ANTES
-        ///     de preguntar por el nombre pelado.
-        ///
-        /// La notacion "MGC ##-##" tampoco vale aqui: GetInstrument devuelve un
-        /// Instrument literal con ese nombre que el feed rechaza igual. Solo la
-        /// entienden los Data Series de los graficos.
-        /// </summary>
+        /// El futuro se resuelve ANTES de preguntar por el nombre pelado, porque
+        /// GetInstrument("MGC") NO devuelve null: devuelve la ACCION MGC, que no esta
+        /// en el feed. Y el contrato que toca no es el de vencimiento mas proximo,
+        /// sino el que marcan los roll settings.</summary>
         private NinjaTrader.Cbi.Instrument ResolveInstrument(string symbol)
         {
             if (string.IsNullOrEmpty(symbol)) return null;
@@ -2606,14 +2194,9 @@ namespace NinjaTrader.NinjaScript.AddOns
             return null;
         }
 
-        /// <summary>Contrato en vigor de una raiz de futuro ("MGC" -> MGC 12-26),
-        /// o null si esa raiz no es un futuro.
-        ///
-        /// NT8 guarda el calendario de rolls en MasterInstrument.RolloverCollection:
-        /// cada Rollover dice "a partir de Date, el contrato es ContractMonth" (mismo
-        /// dato que usa la columna @DaysUntilRollover del Market Analyzer). El que
-        /// vale es el de Date mas reciente ya cumplida.
-        /// </summary>
+        /// <summary>Contrato en vigor de una raiz de futuro ("MGC" -> MGC 12-26), o
+        /// null si no es un futuro. Sale de MasterInstrument.RolloverCollection: vale
+        /// el Rollover de Date mas reciente ya cumplida.</summary>
         private NinjaTrader.Cbi.Instrument ResolveFrontFuture(string root)
         {
             try
@@ -2651,9 +2234,8 @@ namespace NinjaTrader.NinjaScript.AddOns
                             ?? NinjaTrader.Cbi.Instrument.GetInstrument(
                                    root + " " + contractMonth.ToString("MM-yy"));
 
-                // Sin calendario de rolls (o ninguno vencido aun): el mas proximo
-                // sin expirar. Es lo que se hacia antes; puede caer en un contrato
-                // en periodo de aviso, ver la nota (a) de ResolveInstrument.
+                // Sin calendario de rolls: el mas proximo sin expirar. Puede caer en
+                // un contrato en periodo de aviso.
                 if (front == null)
                     front = candidates.Where(i => i.Expiry.Date >= now.Date)
                                       .OrderBy(i => i.Expiry).FirstOrDefault() ?? candidates[0];
@@ -2672,10 +2254,9 @@ namespace NinjaTrader.NinjaScript.AddOns
         }
 
         // =====================================================================
-        //  SocketConn — una conexion TCP al servidor (LOGIN + PING + CHECK_TRADE/
-        //  RELEASE sincronos + recepcion de mensajes push). Cada strategy usa su
-        //  propia instancia (mismo modelo que un EA MT5: un socket == una
-        //  identidad/magic para el servidor).
+        //  SocketConn: una conexion TCP al servidor (LOGIN + PING + llamadas
+        //  sincronas + recepcion de push). Cada strategy usa su propia instancia,
+        //  mismo modelo que un EA MT5: un socket == una identidad/magic.
         // =====================================================================
         private class SocketConn
         {
@@ -2698,9 +2279,7 @@ namespace NinjaTrader.NinjaScript.AddOns
             public volatile bool IsLoggedIn;
             public bool EverConnected;
 
-            // Se dispara al aceptar el LOGIN (tambien en cada RE-conexion). El AddOn
-            // lo usa para soltar sus suscripciones: el estado de "que se comparte" lo
-            // manda la aplicacion, que las volvera a pedir.
+            // Se dispara al aceptar el LOGIN, tambien en cada RE-conexion.
             public Action OnLoggedIn;
 
             public SocketConn(string host, int port, string terminalId, string symbol, int magic, Action<string> onPush, Action<string, bool> log)
@@ -2724,9 +2303,7 @@ namespace NinjaTrader.NinjaScript.AddOns
                     _rxThread = new Thread(ReceiveLoop) { IsBackground = true, Name = "AutomaticTradingNT8-Rx-" + _magic };
                     _rxThread.Start();
 
-                    // LOGIN_OK lo consume HandleLine (marca IsLoggedIn); no llega
-                    // a _pendingResponse, asi que aqui se espera al flag en vez
-                    // de a una respuesta encolada.
+                    // LOGIN_OK lo consume HandleLine: aqui se espera al flag.
                     string login = string.Format(CultureInfo.InvariantCulture, "LOGIN|{0}|{1}|{2}", _magic, _symbol, _terminalId);
                     SendRaw(login);
 
@@ -2773,7 +2350,7 @@ namespace NinjaTrader.NinjaScript.AddOns
                             HandleLine(line);
                     }
                 }
-                catch { /* socket cerrado/muerto: no bloquear reintentos (gotcha guia #4.5) */ }
+                catch { /* socket cerrado/muerto: no bloquear reintentos */ }
                 finally
                 {
                     IsLoggedIn = false;
@@ -2805,10 +2382,8 @@ namespace NinjaTrader.NinjaScript.AddOns
                     _onPush?.Invoke(line);
                     return;
                 }
-                // Handshake: NUNCA encolar. El servidor envia WELCOME al aceptar
-                // la conexion y LOGIN_OK tras el LOGIN. Si acaban en la cola de
-                // respuestas, la primera CHECK_TRADE puede leerlos como si
-                // fueran su respuesta y devolver "DENEGADA -> LOGIN_OK".
+                // Handshake: NUNCA encolar. En la cola de respuestas, la primera
+                // CHECK_TRADE los leeria como si fueran suya.
                 if (line == "WELCOME") return;
                 if (line == "LOGIN_OK")
                 {
@@ -2840,8 +2415,7 @@ namespace NinjaTrader.NinjaScript.AddOns
                 }
             }
 
-            // Serializa request/respuesta: una sola llamada sincrona en vuelo a la vez
-            // por conexion (cada strategy tiene la suya, asi que no compiten entre si).
+            // Una sola llamada sincrona en vuelo por conexion.
             public string SendAndWait(string msg, int timeoutMs)
             {
                 lock (_requestLock)
