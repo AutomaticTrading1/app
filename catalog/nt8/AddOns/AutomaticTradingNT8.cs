@@ -177,6 +177,17 @@ namespace NinjaTrader.NinjaScript.AddOns
             public OrderAction ExitAction;
             public int Qty;
             public double Sl, Tp;
+            // Magic de la posicion a la que protegen. Va en el NOMBRE de la orden
+            // (ver BracketName): es lo unico que ata una contraria a SU posicion,
+            // porque NinjaTrader netea y no da un id de posicion estable.
+            public long Magic;
+        }
+
+        /// <summary>Nombre de las contrarias que hacen de SL/TP de una posicion.
+        /// Lleva el magic dentro para que la asociacion sea exacta.</summary>
+        private static string BracketName(long magic)
+        {
+            return "ATP_bracket_" + magic;
         }
         // _pendingBrackets, la cola del modo reactivo y las conexiones de las
         // strategies viven en AccountLink: todo eso termina en una orden sobre
@@ -281,6 +292,21 @@ namespace NinjaTrader.NinjaScript.AddOns
             public readonly ConcurrentDictionary<long, string> MagicToInstrument = new ConcurrentDictionary<long, string>();
             public readonly ConcurrentDictionary<string, long> InstrumentToMagic = new ConcurrentDictionary<string, long>();
             public readonly ConcurrentDictionary<Order, BracketInfo> PendingBrackets = new ConcurrentDictionary<Order, BracketInfo>();
+
+            // NUESTRA asociacion posicion <-> contrarias. En NinjaTrader un SL/TP
+            // no es un campo de la posicion sino una ORDEN en el libro, asi que si
+            // no la anotamos nosotros nadie sabe que esa Stop es el stop de esa
+            // posicion y no una orden cualquiera del usuario. El nombre
+            // (ATP_bracket_<magic>) sirve para reconocerlas tras reiniciar el
+            // AddOn, pero mientras corre manda este registro: es exacto y no
+            // depende de leer cadenas.
+            public readonly ConcurrentDictionary<long, List<Order>> ActiveBrackets = new ConcurrentDictionary<long, List<Order>>();
+
+            // Magics a los que hemos visto posicion viva alguna vez. Sin esto no
+            // se puede distinguir "la posicion ya cerro" de "la posicion aun no
+            // aparece en Account.Positions", que son el mismo sintoma a los pocos
+            // milisegundos de llenarse la entrada.
+            public readonly ConcurrentDictionary<long, byte> MagicConPosicion = new ConcurrentDictionary<long, byte>();
 
             // Modo reactivo: cola de ordenes de terceros pendientes de gatear +
             // set de las ya evaluadas (OnOrderUpdate dispara varias veces por
@@ -723,6 +749,7 @@ namespace NinjaTrader.NinjaScript.AddOns
                   .Append(Num(margin)).Append('|').Append(Num(marginLevel)).Append('|');
 
                 bool first = true;
+                var qtyPorMagic = new Dictionary<long, int>();
                 foreach (var p in link.Account.Positions.Where(p => p.MarketPosition != MarketPosition.Flat))
                 {
                     if (!first) sb.Append(';');
@@ -744,14 +771,33 @@ namespace NinjaTrader.NinjaScript.AddOns
                     // invalido para order_send.
                     int ticket = (int)(unchecked(instrKey.GetHashCode() ^ (magic * 397)) & 0x7FFFFFFF);
                     if (ticket == 0) ticket = 1;   // 0 esta reservado a "sin magic"
+                    if (magic != 0)
+                    {
+                        qtyPorMagic[magic] = Math.Abs(p.Quantity);
+                        link.MagicConPosicion[magic] = 1;   // ya sabemos que existio
+                    }
                     string type = p.MarketPosition == MarketPosition.Long ? "BUY" : "SELL";
                     double unrealized = 0;
                     try { unrealized = p.GetUnrealizedProfitLoss(PerformanceUnit.Currency); } catch { }
 
+                    // SL/TP: en NinjaTrader NO son campos de la posicion, son
+                    // ORDENES CONTRARIAS vivas en el libro. Se derivan de ellas
+                    // para que MetaTrader pueda copiarlas a sus campos sl/tp.
+                    double slPrice = 0, tpPrice = 0;
+                    FindProtectiveOrders(link, p, out slPrice, out tpPrice);
+
                     sb.Append(ticket).Append(':').Append(instrKey).Append(':').Append(type).Append(':')
                       .Append(Num(Math.Abs(p.Quantity))).Append(':').Append(Num(p.AveragePrice)).Append(':')
-                      .Append("0:0:").Append(Num(unrealized)).Append(':').Append(magic);
+                      .Append(Num(slPrice)).Append(':').Append(Num(tpPrice)).Append(':')
+                      .Append(Num(unrealized)).Append(':').Append(magic);
                 }
+
+                // El bracket tiene que parecerse a la posicion: ni sobrar cuando
+                // ya no hay nada, ni cubrir mas contratos de los que quedan. Va
+                // aqui, sobre el estado, y no colgando de cada camino de cierre:
+                // la reconciliacion aplana y recorta con ordenes A MERCADO y no
+                // pasa ni por ExecuteClose ni por ExecuteClosePartial.
+                SyncBracketsToPositions(link, qtyPorMagic);
 
                 // Que posiciones se estan mandando, cuando cambian. Sin esto, "la
                 // aplicacion no ve mis operaciones" no distingue entre que NT8 no
@@ -766,7 +812,7 @@ namespace NinjaTrader.NinjaScript.AddOns
                     link.LastPositionsCsv = soloPos;
                     Log("AutomaticTradingNT8: STATE de " + link.AccountName + " — posiciones: " +
                         (soloPos.Length == 0 ? "(ninguna)" : soloPos) +
-                        "   [formato ticket:instrumento:tipo:cantidad:precio:0:0:pnl:magic]",
+                        "   [formato ticket:instrumento:tipo:cantidad:precio:sl:tp:pnl:magic]",
                         LogLevel.Information);
                 }
 
@@ -807,6 +853,13 @@ namespace NinjaTrader.NinjaScript.AddOns
                         try { link.ReactiveQueue.Add(e.Order); } catch { }
                     }
                 }
+
+                // Confirmar al motor en cuanto el BROKER se pronuncia sobre una
+                // contraria nuestra. Es el unico momento en que se sabe de
+                // verdad; hasta ahora el motor lo deducia del STATE siguiente,
+                // de hasta 2 s despues, y mientras reenviaba la misma orden.
+                if (e.OrderState == OrderState.Working || e.OrderState == OrderState.Rejected)
+                    SendSlTpAck(link, e.Order);
 
                 if (e.OrderState != OrderState.Filled) return;
 
@@ -873,8 +926,10 @@ namespace NinjaTrader.NinjaScript.AddOns
             try
             {
                 // 1) Si la orden sigue viva, cancelarla (evita que llene).
-                if (o.OrderState == OrderState.Working || o.OrderState == OrderState.Accepted ||
-                    o.OrderState == OrderState.Submitted)
+                //    Por EsOrdenViva y no por una lista de estados "buenos":
+                //    ChangeSubmitted y TriggerPending tambien son ordenes vivas y
+                //    quedaban fuera, asi que el gate no las paraba.
+                if (EsOrdenViva(o))
                 {
                     link.Account.Cancel(new[] { o });
                 }
@@ -915,22 +970,381 @@ namespace NinjaTrader.NinjaScript.AddOns
             catch (Exception ex) { Log("AutomaticTradingNT8: OnExecutionUpdate: " + ex.Message, LogLevel.Error); }
         }
 
-        private void PlaceBracket(AccountLink link, BracketInfo b)
+        /// <summary>SL y TP equivalentes de una posicion NT8, derivados de sus
+        /// ordenes contrarias vivas.
+        ///
+        /// En NinjaTrader la proteccion no es un atributo de la posicion: para un
+        /// largo, el SL es una VENTA StopMarket/StopLimit y el TP una VENTA Limit
+        /// (al reves para un corto). Se clasifica por TIPO de orden, no por estar
+        /// por encima o por debajo de la entrada: un stop subido a break-even
+        /// queda por encima de la entrada y sigue siendo un stop.
+        ///
+        /// Solo cuentan las que cubren la posicion ENTERA. Una pendiente contraria
+        /// de menos cantidad es una toma PARCIAL, y eso no cabe en los campos
+        /// sl/tp de MetaTrader (cierran la posicion completa). No hace falta
+        /// traducirla: cuando llene, la cantidad de la posicion baja y el motor lo
+        /// copia como cierre parcial (ver signal_engine.volume_adjustment).
+        ///
+        /// Si hay varias candidatas se toma la mas cercana al precio: es la que
+        /// dispararia primero.</summary>
+        private void FindProtectiveOrders(AccountLink link, Position p, out double sl, out double tp)
+        {
+            sl = 0; tp = 0;
+            try
+            {
+                if (link == null || link.Account == null || p == null) return;
+                bool isLong = p.MarketPosition == MarketPosition.Long;
+                // La orden que protege un largo es una VENTA, y viceversa.
+                OrderAction exit = isLong ? OrderAction.Sell : OrderAction.Buy;
+                int qty = Math.Abs(p.Quantity);
+                string instrKey = RootSymbol(p.Instrument);
+
+                foreach (var o in link.Account.Orders.ToList())
+                {
+                    if (o == null || o.Instrument == null) continue;
+                    if (!EsOrdenViva(o)) continue;
+                    if (RootSymbol(o.Instrument) != instrKey) continue;
+                    // BuyToCover y SellShort tambien cierran; se normalizan.
+                    bool isExitSell = o.OrderAction == OrderAction.Sell || o.OrderAction == OrderAction.SellShort;
+                    bool isExitBuy = o.OrderAction == OrderAction.Buy || o.OrderAction == OrderAction.BuyToCover;
+                    if (exit == OrderAction.Sell && !isExitSell) continue;
+                    if (exit == OrderAction.Buy && !isExitBuy) continue;
+                    if (o.Quantity < qty) continue;   // parcial: no cabe en sl/tp de MT5
+
+                    if (o.OrderType == OrderType.StopMarket || o.OrderType == OrderType.StopLimit)
+                    {
+                        if (o.StopPrice > 0 && (sl == 0 || Math.Abs(o.StopPrice - p.AveragePrice) < Math.Abs(sl - p.AveragePrice)))
+                            sl = o.StopPrice;
+                    }
+                    else if (o.OrderType == OrderType.Limit || o.OrderType == OrderType.MIT)
+                    {
+                        if (o.LimitPrice > 0 && (tp == 0 || Math.Abs(o.LimitPrice - p.AveragePrice) < Math.Abs(tp - p.AveragePrice)))
+                            tp = o.LimitPrice;
+                    }
+                }
+            }
+            catch (Exception ex) { Log("AutomaticTradingNT8: FindProtectiveOrders: " + ex.Message, LogLevel.Warning); }
+        }
+
+        /// <summary>True si la orden sigue en juego (no ha terminado).
+        ///
+        /// NO se pregunta por Working/Accepted: entre esos dos hay estados
+        /// TRANSITORIOS — ChangeSubmitted, CancelSubmitted, Submitted — y tratar
+        /// uno de ellos como "orden muerta" costo caro el 2026-08-26. Al
+        /// redimensionar un bracket, sus dos piernas pasaron por ChangeSubmitted,
+        /// se borraron del registro, ExecuteUpdateSlTp no encontro bracket y
+        /// coloco OTRO par: cuatro contrarias sobre dos contratos, y las dos
+        /// primeras fuera del registro y por tanto fuera del alcance de la
+        /// barredera. Se quedaron vivas con la posicion ya plana.
+        ///
+        /// Se pregunta al reves: solo esta muerta la que llego a un estado FINAL.</summary>
+        private static bool EsOrdenViva(Order o)
+        {
+            if (o == null) return false;
+            return o.OrderState != OrderState.Cancelled
+                && o.OrderState != OrderState.Filled
+                && o.OrderState != OrderState.Rejected
+                && o.OrderState != OrderState.Unknown;
+        }
+
+        /// <summary>Deja las contrarias como esta la posicion: las de una posicion
+        /// plana se cancelan, y las de una viva se ajustan a su cantidad.
+        ///
+        /// En NinjaTrader un SL/TP es una ORDEN en el libro, no un campo de la
+        /// posicion: cuando la posicion desaparece, la orden NO se va con ella.
+        /// Una Stop huerfana no es inofensiva — si el precio la toca, ABRE una
+        /// posicion en sentido contrario que nadie pidio. Visto en vivo el
+        /// 2026-08-26: la reconciliacion aplano con dos ordenes a mercado y las
+        /// dos piernas del bracket siguieron trabajando.
+        ///
+        /// Se resuelve con NUESTRA asociacion (ActiveBrackets), no leyendo
+        /// nombres ni dando margenes de tiempo: sabemos que ordenes pusimos y
+        /// para que magic. Y solo se barre un magic al que hemos VISTO posicion
+        /// viva antes, que es lo que distingue "ya cerro" de "aun no aparece en
+        /// Account.Positions" — el mismo sintoma en los milisegundos siguientes a
+        /// llenarse la entrada.
+        ///
+        /// Va en el bucle de STATE y no en ExecuteClose porque la reconciliacion
+        /// aplana con ordenes a mercado y nunca pasa por ExecuteClose: la guarda
+        /// tiene que estar donde convergen todos los caminos, que es el estado.</summary>
+        private void SyncBracketsToPositions(AccountLink link, Dictionary<long, int> qtyPorMagic)
         {
             if (link == null || link.Account == null) return;
             try
             {
-                string oco = "ATP_OCO_" + Guid.NewGuid().ToString("N").Substring(0, 8);
+                AdoptOrphanBrackets(link);
+                foreach (var magic in link.ActiveBrackets.Keys.ToList())
+                {
+                    int qtyPos;
+                    if (qtyPorMagic.TryGetValue(magic, out qtyPos))
+                    {
+                        ResizeBracket(link, magic, qtyPos);
+                        continue;                                       // sigue abierta
+                    }
+                    if (!link.MagicConPosicion.ContainsKey(magic)) continue;  // aun no llego
+
+                    List<Order> anotadas;
+                    if (!link.ActiveBrackets.TryGetValue(magic, out anotadas)) continue;
+
+                    List<Order> vivas;
+                    lock (anotadas)
+                    {
+                        vivas = anotadas.Where(EsOrdenViva).ToList();
+                        anotadas.Clear();
+                    }
+                    List<Order> _v;
+                    link.ActiveBrackets.TryRemove(magic, out _v);
+                    byte _b;
+                    link.MagicConPosicion.TryRemove(magic, out _b);
+                    if (vivas.Count == 0) continue;
+
+                    link.Account.Cancel(vivas.ToArray());
+                    Log("AutomaticTradingNT8: magic=" + magic + ": posicion plana, " + vivas.Count +
+                        " contraria(s) cancelada(s) en " + link.AccountName + ".", LogLevel.Information);
+                }
+            }
+            catch (Exception ex)
+            {
+                Log("AutomaticTradingNT8: SyncBracketsToPositions: " + ex.Message, LogLevel.Warning);
+            }
+        }
+
+        /// <summary>Dice al motor que niveles tiene AHORA el bracket de ese magic.
+        ///
+        /// `Account.Change` no devuelve nada: la respuesta del broker llega por
+        /// OnOrderUpdate, cuando la orden pasa a Working con los valores nuevos o
+        /// la rechaza. Eso es una confirmacion de verdad — "ya esta puesto" — y no
+        /// un "se lo he pedido", que es lo unico que se podia decir antes de
+        /// mirar el libro.
+        ///
+        /// Se manda el PAR entero (sl y tp), no la pierna que cambio: el motor
+        /// compara los dos a la vez, igual que los pide.</summary>
+        private void SendSlTpAck(AccountLink link, Order o)
+        {
+            try
+            {
+                if (o == null || link == null || link.Conn == null) return;
+                string nombre = o.Name ?? "";
+                if (!nombre.StartsWith("ATP_bracket_", StringComparison.Ordinal)) return;
+
+                long magic;
+                if (!long.TryParse(nombre.Substring("ATP_bracket_".Length), out magic)) return;
+
+                bool ok = o.OrderState != OrderState.Rejected;
+                double sl = 0, tp = 0;
+                List<Order> anotadas;
+                if (link.ActiveBrackets.TryGetValue(magic, out anotadas))
+                {
+                    lock (anotadas)
+                    {
+                        foreach (var b in anotadas)
+                        {
+                            if (!EsOrdenViva(b)) continue;
+                            if (b.OrderType == OrderType.StopMarket || b.OrderType == OrderType.StopLimit)
+                                sl = b.StopPrice;
+                            else if (b.OrderType == OrderType.Limit || b.OrderType == OrderType.MIT)
+                                tp = b.LimitPrice;
+                        }
+                    }
+                }
+                link.Conn.SendRaw("SLTP_ACK|" + magic + "|" + Num(sl) + "|" + Num(tp) + "|" + (ok ? "1" : "0"));
+                if (!ok)
+                    Log("AutomaticTradingNT8: magic=" + magic + ": el broker RECHAZO la contraria (" +
+                        o.OrderType + ").", LogLevel.Warning);
+            }
+            catch (Exception ex) { Log("AutomaticTradingNT8: SendSlTpAck: " + ex.Message, LogLevel.Warning); }
+        }
+
+        /// <summary>Recupera en el registro las contrarias que sobrevivieron a un
+        /// reinicio del AddOn.
+        ///
+        /// ActiveBrackets vive en memoria: recompilar el AddOn (o reiniciar
+        /// NinjaTrader) la vacia, pero las ordenes siguen vivas en el broker. Sin
+        /// readoptarlas quedan fuera del grupo — ni se cancelan al cerrar la
+        /// posicion ni se ajustan al cambiar de tamaño — y son exactamente el
+        /// tipo de orden suelta que abre posicion en contra si el precio la toca.
+        ///
+        /// Para esto lleva el magic dentro del nombre (ver BracketName): es la
+        /// unica pista que sobrevive al reinicio.</summary>
+        private void AdoptOrphanBrackets(AccountLink link)
+        {
+            foreach (var o in link.Account.Orders.ToList())
+            {
+                if (!EsOrdenViva(o)) continue;
+                string nombre = o.Name ?? "";
+                if (!nombre.StartsWith("ATP_bracket_", StringComparison.Ordinal)) continue;
+
+                long magic;
+                if (!long.TryParse(nombre.Substring("ATP_bracket_".Length), out magic)) continue;
+                if (magic == 0) continue;
+
+                bool nueva = false;
+                var lista = link.ActiveBrackets.GetOrAdd(magic, _ => new List<Order>());
+                lock (lista)
+                {
+                    if (!lista.Contains(o)) { lista.Add(o); nueva = true; }
+                }
+                if (!nueva) continue;
+
+                // Se marca SIEMPRE, tenga posicion ahora o no. Marcar solo cuando la
+                // hay dejaba a la readoptada fuera del alcance de la barredera —
+                // el mismo agujero que venia a tapar.
+                //
+                // El riesgo de marcar de mas es cancelar el bracket de una
+                // posicion que este arrancando y aun no figure en
+                // Account.Positions. Se asume a proposito porque ese error SE
+                // CURA SOLO: el motor ve la copia sin niveles y manda otra vez
+                // CMD_UPDATE_SLTP. Dejar viva una contraria sin posicion detras no
+                // se cura nunca, y abre posicion en contra si el precio la toca.
+                link.MagicConPosicion[magic] = 1;
+                Log("AutomaticTradingNT8: magic=" + magic + ": contraria recuperada tras reinicio (" +
+                    o.OrderType + " " + o.Quantity + ").", LogLevel.Information);
+            }
+        }
+
+        /// <summary>Ajusta la cantidad de las contrarias a la de la posicion.
+        ///
+        /// Un bracket que cubre MENOS contratos de los que hay deja parte de la
+        /// posicion desnuda. Uno que cubre MAS es peor: al saltar vende mas de lo
+        /// que se tiene y ABRE posicion en sentido contrario.
+        ///
+        /// Hasta el 2026-08-26 esto solo se corregia de refilon — al ampliar,
+        /// dentro de ExecuteUpdateSlTp, y al recortar, dentro de
+        /// ExecuteClosePartial. Los dos dependen de que alguien mande un comando:
+        /// la reconciliacion recorta con una orden a mercado y no manda ninguno,
+        /// asi que una posicion de 2 que bajaba a 1 se quedaba con bracket de 2.
+        /// Visto en vivo. Por eso se comprueba contra el ESTADO en cada pasada.</summary>
+        private void ResizeBracket(AccountLink link, long magic, int qtyPos)
+        {
+            if (qtyPos <= 0) return;
+            List<Order> anotadas;
+            if (!link.ActiveBrackets.TryGetValue(magic, out anotadas)) return;
+
+            var ajustar = new List<Order>();
+            lock (anotadas)
+            {
+                anotadas.RemoveAll(o => !EsOrdenViva(o));
+                foreach (var o in anotadas)
+                {
+                    if (o.Quantity == qtyPos) continue;
+                    // QuantityChanged, no Quantity: ver la nota de ExecuteUpdateSlTp.
+                    o.QuantityChanged = qtyPos;
+                    ajustar.Add(o);
+                }
+            }
+            if (ajustar.Count == 0) return;
+
+            link.Account.Change(ajustar.ToArray());
+            Log("AutomaticTradingNT8: magic=" + magic + ": bracket ajustado a " + qtyPos +
+                " contrato(s) (" + ajustar.Count + " orden/es).", LogLevel.Information);
+        }
+
+        /// <summary>Ordenes del bracket que este AddOn coloco para un magic.</summary>
+        private System.Collections.Generic.List<Order> FindBracketOrders(AccountLink link, long magic)
+        {
+            var res = new System.Collections.Generic.List<Order>();
+            try
+            {
+                string instrKey;
+                if (!link.MagicToInstrument.TryGetValue(magic, out instrKey)) return res;
+                // El registro propio primero: mientras el AddOn corre, sabemos
+                // exactamente que ordenes pusimos para este magic.
+                List<Order> anotadas;
+                if (link.ActiveBrackets.TryGetValue(magic, out anotadas))
+                {
+                    lock (anotadas)
+                    {
+                        anotadas.RemoveAll(o => !EsOrdenViva(o));
+                        res.AddRange(anotadas);
+                        if (anotadas.Count == 0) { List<Order> _v; link.ActiveBrackets.TryRemove(magic, out _v); }
+                    }
+                    if (res.Count > 0) return res;
+                }
+
+                // Sin registro (el AddOn se reinicio y las ordenes siguen vivas en
+                // el broker): se reconocen por el nombre, que para eso lleva el
+                // magic dentro.
+                foreach (var o in link.Account.Orders.ToList())
+                {
+                    if (o == null || o.Instrument == null) continue;
+                    if (!EsOrdenViva(o)) continue;
+                    // Por nombre CON magic. Se acepta tambien el nombre viejo
+                    // ("ATP_bracket" a secas) para no dejar huerfano un bracket
+                    // colocado por una version anterior del AddOn: mejor poder
+                    // moverlo y cancelarlo que ignorarlo.
+                    bool mio = string.Equals(o.Name, BracketName(magic), StringComparison.Ordinal)
+                               || string.Equals(o.Name, "ATP_bracket", StringComparison.Ordinal);
+                    if (!mio) continue;
+                    if (RootSymbol(o.Instrument) != instrKey) continue;
+                    res.Add(o);
+                }
+            }
+            catch (Exception ex) { Log("AutomaticTradingNT8: FindBracketOrders: " + ex.Message, LogLevel.Warning); }
+            return res;
+        }
+
+        /// <summary>Ajusta un precio al tick del instrumento.
+        ///
+        /// Los niveles llegan de MetaTrader traducidos por proporcion, asi que
+        /// salen con decimales arbitrarios (29229.89955022) que no son multiplos
+        /// del tick de MNQ (0.25). `CreateOrder` redondea solo al enviar, pero
+        /// asi el precio que registramos en el log y el que reporta el STATE son
+        /// exactamente el que va a tener la orden.
+        ///
+        /// (Nota: el fallo de "el stop no se movia" NO era el redondeo — era usar
+        /// StopPrice en vez de StopPriceChanged. Ver ExecuteUpdateSlTp.)</summary>
+        private static double RoundToTick(NinjaTrader.Cbi.Instrument instr, double price)
+        {
+            if (instr == null || price <= 0) return price;
+            try
+            {
+                if (instr.MasterInstrument != null)
+                    return instr.MasterInstrument.RoundToTickSize(price);
+            }
+            catch { }
+            return price;
+        }
+
+        /// <summary>Coloca las contrarias que hacen de SL/TP.
+        ///
+        /// `ocoExistente`: si ya hay una pierna viva se reutiliza SU id de OCO,
+        /// para que la nueva quede atada a ella (si una llena, la otra se cancela
+        /// sola). Solo se genera uno nuevo cuando no hay ninguna.</summary>
+        private void PlaceBracket(AccountLink link, BracketInfo b, string ocoExistente = null)
+        {
+            if (link == null || link.Account == null) return;
+            try
+            {
+                string oco = !string.IsNullOrEmpty(ocoExistente)
+                    ? ocoExistente
+                    : "ATP_OCO_" + Guid.NewGuid().ToString("N").Substring(0, 8);
+                // El nombre lleva el magic para que la asociacion posicion<->
+                // contrarias sea EXACTA. Con "ATP_bracket" a secas, el filtro solo
+                // podia ser por instrumento y dos copias de magics distintos sobre
+                // el mismo instrumento se pisaban.
+                string nombre = BracketName(b.Magic);
                 var children = new System.Collections.Generic.List<Order>();
-                if (b.Sl > 0)
+                // Al tick tambien aqui: CreateOrder redondea al enviar, pero asi el
+                // precio que registramos es el mismo que va a tener la orden.
+                double sl = RoundToTick(b.Instrument, b.Sl);
+                double tp = RoundToTick(b.Instrument, b.Tp);
+                if (sl > 0)
                     children.Add(link.Account.CreateOrder(b.Instrument, b.ExitAction, OrderType.StopMarket,
-                        OrderEntry.Automated, TimeInForce.Gtc, b.Qty, 0, b.Sl, oco, "ATP_bracket",
+                        OrderEntry.Automated, TimeInForce.Gtc, b.Qty, 0, sl, oco, nombre,
                         Core.Globals.MaxDate, null));
-                if (b.Tp > 0)
+                if (tp > 0)
                     children.Add(link.Account.CreateOrder(b.Instrument, b.ExitAction, OrderType.Limit,
-                        OrderEntry.Automated, TimeInForce.Gtc, b.Qty, b.Tp, 0, oco, "ATP_bracket",
+                        OrderEntry.Automated, TimeInForce.Gtc, b.Qty, tp, 0, oco, nombre,
                         Core.Globals.MaxDate, null));
-                if (children.Count > 0) link.Account.Submit(children.ToArray());
+                if (children.Count > 0)
+                {
+                    link.Account.Submit(children.ToArray());
+                    // Anotar ANTES de que nadie pregunte: es la asociacion que
+                    // convierte "una Stop suelta" en "el stop de ESTA posicion".
+                    link.ActiveBrackets.AddOrUpdate(b.Magic,
+                        _ => new List<Order>(children),
+                        (_, previas) => { lock (previas) { previas.AddRange(children); } return previas; });
+                }
             }
             catch (Exception ex) { Log("AutomaticTradingNT8: PlaceBracket: " + ex.Message, LogLevel.Warning); }
         }
@@ -968,7 +1382,13 @@ namespace NinjaTrader.NinjaScript.AddOns
                 long magic = ParseMagic(parts[1]);
                 double sl = ParseD(parts[2]);
                 double tp = ParseD(parts[3]);
-                ExecuteUpdateSlTp(magic, sl, tp);
+                ExecuteUpdateSlTp(link, magic, sl, tp);
+            }
+            else if (cmd == "CMD_CLOSE_PARTIAL" && parts.Length >= 3)
+            {
+                long magic = ParseMagic(parts[1]);
+                double qty = ParseD(parts[2]);
+                ExecuteClosePartial(link, magic, qty);
             }
             else if (cmd == "CMD_FLATTEN")
             {
@@ -1791,8 +2211,11 @@ namespace NinjaTrader.NinjaScript.AddOns
                 //    pendientes). Debe ir ANTES de crear el flatten: si se hace
                 //    despues, la propia orden de cierre (que pasa por Working)
                 //    se cancelaria a si misma (bug: la posicion no se cerraba).
-                var working = link.Account.Orders.Where(o => o.OrderState == OrderState.Working ||
-                    o.OrderState == OrderState.Accepted || o.OrderState == OrderState.Submitted).ToList();
+                //    Y por EsOrdenViva: con la lista de estados, un bracket que
+                //    estuviese en ChangeSubmitted en ese instante NO se cancelaba
+                //    y sobrevivia a la parada de emergencia — justo lo que no
+                //    puede pasar en el camino que existe para dejar todo a cero.
+                var working = link.Account.Orders.Where(EsOrdenViva).ToList();
                 if (working.Count > 0) link.Account.Cancel(working.ToArray());
 
                 // 2) Aplanar todas las posiciones abiertas con market opuesta.
@@ -1836,7 +2259,7 @@ namespace NinjaTrader.NinjaScript.AddOns
                     {
                         Instrument = instrument,
                         ExitAction = action == OrderAction.Buy ? OrderAction.Sell : OrderAction.Buy,
-                        Qty = qty, Sl = sl, Tp = tp,
+                        Qty = qty, Sl = sl, Tp = tp, Magic = magic,
                     };
                 }
                 string openRoot = RootSymbol(instrument);
@@ -1870,6 +2293,19 @@ namespace NinjaTrader.NinjaScript.AddOns
                         "): ya no hay posicion abierta.", LogLevel.Information);
                     return;
                 }
+                // PRIMERO cancelar el bracket, DESPUES aplanar. El OCO ata las dos
+                // ordenes ENTRE SI, no a la posicion: si la cierra una tercera orden
+                // — que es justo lo que hacemos aqui — las pendientes siguen vivas y
+                // la que salte ABRE POSICION EN SENTIDO CONTRARIO. NinjaTrader no las
+                // limpia solo.
+                var brackets = FindBracketOrders(link, magic);
+                if (brackets.Count > 0)
+                {
+                    link.Account.Cancel(brackets.ToArray());
+                    Log("AutomaticTradingNT8: CMD_CLOSE magic=" + magic + ": cancelado bracket (" +
+                        brackets.Count + " orden/es) antes de aplanar.", LogLevel.Information);
+                }
+
                 var action = pos.MarketPosition == MarketPosition.Long ? OrderAction.Sell : OrderAction.Buy;
                 var order = link.Account.CreateOrder(pos.Instrument, action, OrderType.Market, OrderEntry.Automated, TimeInForce.Gtc,
                     Math.Abs(pos.Quantity), 0, 0, string.Empty, "ATP_" + magic, Core.Globals.MaxDate, null);
@@ -1879,13 +2315,189 @@ namespace NinjaTrader.NinjaScript.AddOns
             catch (Exception ex) { Log("AutomaticTradingNT8: CMD_CLOSE error: " + ex.Message, LogLevel.Error); }
         }
 
-        private void ExecuteUpdateSlTp(long magic, double sl, double tp)
+        /// <summary>Mueve (o crea) el bracket SL/TP de un magic.
+        ///
+        /// Usa Account.Change() sobre las ordenes vivas en vez de cancelar y
+        /// recolocar: cancelar deja una ventana sin proteccion, y si el submit
+        /// nuevo falla la posicion se queda desnuda.
+        ///
+        /// Si no hay bracket todavia (la posicion se abrio sin SL/TP y el emisor
+        /// los pone despues, que es el flujo manual normal) se coloca uno.</summary>
+        private void ExecuteUpdateSlTp(AccountLink link, long magic, double sl, double tp)
         {
-            // Reservado: requiere localizar/cancelar las ordenes hijas SL/TP existentes
-            // del bracket de ese magic y recolocarlas. No implementado en v1 (el
-            // copiador de señales sincroniza SL/TP tras abrir; para NT8 el bracket ya
-            // se coloca en la apertura via CMD_OPEN — ver PlaceBracket).
-            Log("AutomaticTradingNT8: CMD_UPDATE_SLTP magic=" + magic + " no implementado en v1.", LogLevel.Warning);
+            if (link == null || link.Account == null) return;
+            try
+            {
+                string instrKey;
+                if (!link.MagicToInstrument.TryGetValue(magic, out instrKey))
+                {
+                    Log("AutomaticTradingNT8: CMD_UPDATE_SLTP magic=" + magic +
+                        " desconocido: no se puede situar el bracket.", LogLevel.Warning);
+                    return;
+                }
+                var pos = link.Account.Positions.FirstOrDefault(
+                    p => RootSymbol(p.Instrument) == instrKey && p.MarketPosition != MarketPosition.Flat);
+                if (pos == null) return;
+
+                // AL TICK ANTES DE TOCAR NADA. Los niveles llegan traducidos por
+                // proporcion, con decimales que no son multiplos del tick, y
+                // Account.Change los descarta EN SILENCIO (ver RoundToTick).
+                sl = RoundToTick(pos.Instrument, sl);
+                tp = RoundToTick(pos.Instrument, tp);
+
+                var existentes = FindBracketOrders(link, magic);
+                var cambiar = new System.Collections.Generic.List<Order>();
+
+                // La cantidad del bracket tiene que seguir a la posicion. Al
+                // AMPLIAR, NinjaTrader netea y la posicion pasa de 1 a 2, pero el
+                // bracket se quedaba en 1: un contrato desnudo. Y ademas
+                // FindProtectiveOrders descarta un bracket menor que la posicion
+                // ("o.Quantity < qty"), asi que el STATE reportaba 0:0 y el motor
+                // creia que NO habia ninguna proteccion, no que faltase media.
+                // Visto en vivo el 2026-08-26: posicion 2, bracket 1, STATE 0:0.
+                int qtyPos = Math.Abs(pos.Quantity);
+                // OJO: Account.Change NO lee StopPrice/LimitPrice, lee
+                // StopPriceChanged/LimitPriceChanged. Asignando la propiedad
+                // normal solo se muta el objeto LOCAL: NinjaTrader manda un
+                // cambio sin cambio (se ve "Change submitted -> Accepted ->
+                // Working" con el precio intacto) y, peor, FindProtectiveOrders
+                // lee ese objeto y reporta un nivel FANTASMA que en el broker no
+                // existe. Verificado en vivo el 2026-08-25.
+                var cancelar = new System.Collections.Generic.List<Order>();
+                bool haySl = false, hayTp = false;
+                string ocoVivo = null;
+                foreach (var o in existentes)
+                {
+                    bool esStop = o.OrderType == OrderType.StopMarket || o.OrderType == OrderType.StopLimit;
+                    bool esLimit = o.OrderType == OrderType.Limit;
+                    if (!esStop && !esLimit) continue;
+
+                    // El emisor BORRO ese nivel: hay que cancelar la contraria, no
+                    // dejarla viva. Si no, quitar el TP en MetaTrader dejaba la
+                    // Limit trabajando en NinjaTrader, y al tocarla se cerraba la
+                    // copia mientras el emisor seguia dentro: cuentas divergentes
+                    // sin que nada lo dijera. Es el espejo del bracket huerfano.
+                    double objetivo = esStop ? sl : tp;
+                    if (objetivo <= 0) { cancelar.Add(o); continue; }
+
+                    // Solo el OCO de las que SOBREVIVEN: atar una pierna nueva al
+                    // grupo de una que acabamos de cancelar no ata nada.
+                    if (!string.IsNullOrEmpty(o.Oco)) ocoVivo = o.Oco;
+
+                    // Precio y cantidad se miran por separado: al ampliar sin
+                    // mover el stop, el precio ya esta bien y solo falta crecer.
+                    // Con un unico `continue` por precio, ese caso no se tocaba.
+                    bool toca = false;
+                    if (o.Quantity != qtyPos) { o.QuantityChanged = qtyPos; toca = true; }
+
+                    if (esStop)
+                    {
+                        haySl = true;
+                        if (Math.Abs(o.StopPrice - sl) >= 1e-9) { o.StopPriceChanged = sl; toca = true; }
+                    }
+                    else
+                    {
+                        hayTp = true;
+                        if (Math.Abs(o.LimitPrice - tp) >= 1e-9) { o.LimitPriceChanged = tp; toca = true; }
+                    }
+                    if (toca) cambiar.Add(o);
+                }
+
+                if (cancelar.Count > 0)
+                {
+                    link.Account.Cancel(cancelar.ToArray());
+                    // CANCELAR UNA PIERNA MATA EL GRUPO OCO ENTERO — es lo que
+                    // significa "one cancels other". Verificado en vivo el
+                    // 2026-08-26: al cancelar la Limit, NinjaTrader cancelo
+                    // tambien la Stop Market. Asi que lo que el emisor SIGA
+                    // queriendo hay que recolocarlo con un OCO nuevo; darlo por
+                    // existente dejaba la posicion sin ninguna proteccion.
+                    haySl = false; hayTp = false; ocoVivo = null;
+                    cambiar.Clear();   // esas ordenes ya no existen: no se pueden mover
+                    Log("AutomaticTradingNT8: CMD_UPDATE_SLTP magic=" + magic + ": el emisor quito " +
+                        (sl <= 0 ? "el SL " : "") + (tp <= 0 ? "el TP " : "") +
+                        "-> cancelado el grupo OCO (" + cancelar.Count + " pedida(s), cae el grupo entero)" +
+                        ((sl > 0 || tp > 0) ? "; se recoloca lo que queda." : "."), LogLevel.Information);
+                }
+                if (cambiar.Count > 0)
+                {
+                    link.Account.Change(cambiar.ToArray());
+                    Log("AutomaticTradingNT8: CMD_UPDATE_SLTP magic=" + magic + " SL=" + Num(sl) +
+                        " TP=" + Num(tp) + " (" + cambiar.Count + " orden/es movidas)", LogLevel.Information);
+                }
+
+                // Piernas que el emisor quiere y todavia no existen. Se colocan
+                // reutilizando el OCO de las que ya estan, para que sigan
+                // atandose entre si (si una llena, la otra se cancela sola).
+                double faltaSl = (sl > 0 && !haySl) ? sl : 0;
+                double faltaTp = (tp > 0 && !hayTp) ? tp : 0;
+                if (faltaSl <= 0 && faltaTp <= 0) return;
+
+                PlaceBracket(link, new BracketInfo
+                {
+                    Instrument = pos.Instrument,
+                    ExitAction = pos.MarketPosition == MarketPosition.Long ? OrderAction.Sell : OrderAction.Buy,
+                    Qty = Math.Abs(pos.Quantity),
+                    Sl = faltaSl,
+                    Tp = faltaTp,
+                    Magic = magic,
+                }, ocoVivo);
+                Log("AutomaticTradingNT8: CMD_UPDATE_SLTP magic=" + magic +
+                    " contraria(s) colocada(s) SL=" + Num(faltaSl) + " TP=" + Num(faltaTp), LogLevel.Information);
+            }
+            catch (Exception ex) { Log("AutomaticTradingNT8: CMD_UPDATE_SLTP error: " + ex.Message, LogLevel.Error); }
+        }
+
+        /// <summary>Recorta `qty` contratos de la posicion de ese magic sin cerrarla.
+        ///
+        /// NT8 netea por instrumento, asi que una orden a mercado en sentido
+        /// contrario reduce la posicion. El bracket sobrante se ajusta a la
+        /// cantidad que queda: si no, protegeria mas contratos de los que hay y al
+        /// saltar abriria posicion en sentido contrario.</summary>
+        private void ExecuteClosePartial(AccountLink link, long magic, double qty)
+        {
+            if (link == null || link.Account == null) return;
+            int cantidad = (int)Math.Round(qty);
+            if (cantidad <= 0) return;
+            try
+            {
+                string instrKey;
+                if (!link.MagicToInstrument.TryGetValue(magic, out instrKey))
+                {
+                    Log("AutomaticTradingNT8: CMD_CLOSE_PARTIAL magic=" + magic +
+                        " desconocido: no se recorta nada.", LogLevel.Warning);
+                    return;
+                }
+                var pos = link.Account.Positions.FirstOrDefault(
+                    p => RootSymbol(p.Instrument) == instrKey && p.MarketPosition != MarketPosition.Flat);
+                if (pos == null) return;
+
+                int vivos = Math.Abs(pos.Quantity);
+                if (cantidad >= vivos)
+                {
+                    // Recorte que se come la posicion entera: es un cierre.
+                    ExecuteClose(link, magic);
+                    return;
+                }
+                var action = pos.MarketPosition == MarketPosition.Long ? OrderAction.Sell : OrderAction.Buy;
+                var order = link.Account.CreateOrder(pos.Instrument, action, OrderType.Market,
+                    OrderEntry.Automated, TimeInForce.Gtc, cantidad, 0, 0, string.Empty,
+                    "ATP_" + magic, Core.Globals.MaxDate, null);
+                link.Account.Submit(new[] { order });
+
+                // Encoger el bracket a lo que queda.
+                int restantes = vivos - cantidad;
+                var brackets = FindBracketOrders(link, magic);
+                if (brackets.Count > 0)
+                {
+                    // QuantityChanged, no Quantity: ver la nota de ExecuteUpdateSlTp.
+                    foreach (var o in brackets) o.QuantityChanged = restantes;
+                    link.Account.Change(brackets.ToArray());
+                }
+                Log("AutomaticTradingNT8: CMD_CLOSE_PARTIAL magic=" + magic + " -" + cantidad +
+                    " (quedan " + restantes + ") en " + link.AccountName, LogLevel.Information);
+            }
+            catch (Exception ex) { Log("AutomaticTradingNT8: CMD_CLOSE_PARTIAL error: " + ex.Message, LogLevel.Error); }
         }
 
         /// <summary>Magic que llega en los CMD_. En la copia MT5 -&gt; NT8 el magic ES

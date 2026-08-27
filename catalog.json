@@ -23,10 +23,10 @@
       "platform": "nt8",
       "kind": "AddOns",
       "file": "AutomaticTradingNT8.cs",
-      "version": "1.73",
-      "sha256": "d8db09db40d02a41053c7f8f26dc861fa029b24234ce82ee22de6ca47a2e1eed",
-      "notes": "AddOn puente para NinjaTrader 8: gate de riesgo, copia de senales y datos compartidos con MT5. Puentea todas las cuentas conectadas a la vez, cada una como su propio terminal. Novedades: corregido un fallo que podia cerrar la posicion equivocada al copiar de MetaTrader a NinjaTrader. La copia se identifica por el ticket de la posicion de origen, y los tickets de MT5 por encima de 2.147.483.647 se desbordaban y acababan todos en el mismo valor: con dos copias vivas en la misma cuenta, el cierre de una cerraba la otra. Ahora el AddOn maneja esos numeros en 64 bits. Tras instalarlo hay que recompilar en NinjaScript (F5).",
-      "min_app": "1.6"
+      "version": "1.74",
+      "sha256": "08da500582e5dc2b58e4625a91617a02479197716816fe4b3001ff3a485b70b9",
+      "notes": "AddOn puente para NinjaTrader 8: gate de riesgo, copia de senales y datos compartidos con MT5. Puentea todas las cuentas conectadas a la vez, cada una como su propio terminal. Novedades, todas sobre las ordenes contrarias que hacen de SL/TP: la cantidad del bracket ahora SIGUE a la de la posicion — al ampliar protegia de menos y al recortar protegia de MAS, y un bracket mayor que la posicion abre posicion en sentido contrario si salta. Una contraria que se queda sin posicion detras se cancela sola, venga el cierre por donde venga. Las contrarias se recuperan tras recompilar el AddOn, en vez de quedarse vivas fuera de control. Y los estados de paso de una orden (ChangeSubmitted, CancelSubmitted) ya no se confunden con una orden muerta: eso provocaba brackets duplicados al redimensionar y dejaba pasar ordenes en la parada de emergencia. Ademas confirma a la aplicacion cuando el broker acepta o rechaza un nivel, en vez de que ella lo deduzca del estado. Tras instalarlo hay que recompilar en NinjaScript (F5).",
+      "min_app": "1.7"
     }
   ]
 }
