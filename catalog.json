@@ -13,6 +13,15 @@
     {
       "platform": "mt5",
       "kind": "Experts",
+      "file": "AT_USDJPY_neuronnx_v3.ex5",
+      "version": "3.00",
+      "sha256": "f9de6fa757c3fa62beee7ba8750212b995f7d6dab53723b5176024b36ed0d06c",
+      "notes": "Seguimiento de tendencia en USD/JPY H1, solo posiciones largas. Un filtro de red neuronal (ONNX) descarta las rupturas agotadas o no confirmadas por el resto del complejo yen: mide la fuerza del yen con EUR/JPY, GBP/JPY y AUD/JPY, asi que el broker tiene que ofrecer esos tres cruces ademas de USD/JPY. Riesgo por porcentaje, break-even, trailing y guardian de fondeo. Un simbolo, una posicion a la vez; no usa grid ni martingala. Gestionado de fabrica: la aplicacion controla sus entradas con las reglas de riesgo de la cartera. El backtest no se ve afectado.",
+      "min_app": "1.6"
+    },
+    {
+      "platform": "mt5",
+      "kind": "Experts",
       "file": "AT_Wyckoff_induction.ex5",
       "version": "3.10",
       "sha256": "56e34321f4c39ef3272c18416ae306784a57cb11fa2c2f9c468879e5aa56c842",
