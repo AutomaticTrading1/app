@@ -30,6 +30,22 @@
     },
     {
       "platform": "nt8",
+      "kind": "Indicators",
+      "file": "AT_ChartTrader.cs",
+      "version": "1.0",
+      "sha256": "e449fc8a4bfe6cdcbb08e74605872b730fba28cf96de8161defdccbc53b5b42d",
+      "notes": "Panel de operativa acoplado al Chart Trader de NinjaTrader. Anade lo que NT8 no trae como boton: entradas LMT, STP y STP LMT colocadas con el raton sobre el grafico, y tamano de posicion calculado por riesgo (porcentaje de la cuenta o dinero fijo) a partir de la distancia al stop. El SL y el TP se ponen como precios en el grafico, ensenan en vivo lo que se arriesga y lo que se gana mientras se mueven, y se envian como par OCO cuando la entrada se llena, tambien si se llena a medias. Incluye break-even automatico y cancela el SL/TP que queda suelto si la posicion se cierra por fuera. La operativa arranca DESARMADA: sin armarla, el boton EXECUTE no manda nada. Necesita el Chart Trader del grafico abierto. Tras instalarlo hay que recompilar en NinjaScript (F5)."
+    },
+    {
+      "platform": "nt8",
+      "kind": "Indicators",
+      "file": "AT_RoundLevels.cs",
+      "version": "1.0",
+      "sha256": "d8fbb72abf7477b8827b48edfa0adbd172bc3011e076c549117fd5687276c666",
+      "notes": "Zonas de numeros redondos para el grafico. Marca las bandas de precio alrededor de cada numero redondo, con color segun queden por encima o por debajo del precio actual. El paso sale del RANGO VISIBLE del grafico y se ajusta a la serie 1-2-5, asi que se ven siempre las mismas lineas sea cual sea el activo, el zoom o el alto del monitor. Botones en la barra de la ventana para multiplicar el paso. Tras instalarlo hay que recompilar en NinjaScript (F5)."
+    },
+    {
+      "platform": "nt8",
       "kind": "AddOns",
       "file": "AutomaticTradingNT8.cs",
       "version": "1.75",
