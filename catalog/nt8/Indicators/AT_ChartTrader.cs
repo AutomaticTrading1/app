@@ -1,4 +1,4 @@
-// =============================================================================
+﻿// =============================================================================
 //  AutomaticTrading  -  https://www.automatictrading.net/
 //  (c) 2026 AutomaticTrading. Todos los derechos reservados.
 //
@@ -9,7 +9,7 @@
 // =============================================================================
 //  AT_ChartTrader.cs  -  Panel de operativa acoplado al Chart Trader de NT8.
 // -----------------------------------------------------------------------------
-//  Se acopla DENTRO del Chart Trader nativo (su grid interno "grdMain") y anade
+//  Se acopla DENTRO del Chart Trader nativo (su grid interno "grdMain") y suma
 //  lo que NT8 no trae como boton: entradas LMT / STP / STP LMT colocadas en el
 //  grafico, dimensionado por riesgo, y un interruptor de operativa.
 //
@@ -110,7 +110,7 @@ namespace NinjaTrader.NinjaScript.Indicators
 
         // TODOS congelados. Un SolidColorBrush es un Freezable y, sin congelar,
         // queda atado al hilo que ejecute el inicializador estatico de la clase
-        // — que es el que NinjaTrader toque primero, no necesariamente el de la
+        // - que es el que NinjaTrader toque primero, no necesariamente el de la
         // interfaz. Al asignarlo despues a un control desde el hilo de la UI,
         // WPF lanza "No se puede usar un elemento DependencyObject que pertenezca
         // a un subproceso diferente al de su primario Freezable", y como el panel
@@ -189,6 +189,8 @@ namespace NinjaTrader.NinjaScript.Indicators
         // render) para pintar los niveles apagados cuando el plan no es valido.
         private volatile bool planValid;
         private Button pinStopBtn, pinTargetBtn, pinRRBtn;
+        private CheckBox useStopCheck, useTargetCheck;
+        private volatile bool useStop = true, useTarget = true;
         private readonly Dictionary<Slot, Button> slotLabels = new Dictionary<Slot, Button>();
         private Grid      limitRow;
         private Button    pctBtn, moneyBtn, autoBtn, manualBtn, execButton, armButton;
@@ -247,7 +249,19 @@ namespace NinjaTrader.NinjaScript.Indicators
         // posicion abierta con ellas puestas. Sin ese segundo dato no se puede
         // distinguir "aun no ha aparecido la posicion" de "la posicion ya se
         // cerro", y cancelariamos la proteccion recien enviada.
-        private readonly List<Order> protectionOrders = new List<Order>();
+        // Las protecciones se llevan por PARES OCO, no como ordenes sueltas. Hace
+        // falta porque ahora la cobertura puede ser PARCIAL: se puede tener 6
+        // contratos sin proteger y anadir 3 con SL y TP. Al recortar hay que
+        // tocar las dos patas del mismo par a la vez, o se queda una pata
+        // huerfana sin su OCO.
+        private sealed class ProtPair
+        {
+            public Order Stop;      // puede ser null si solo se puso TP
+            public Order Target;    // puede ser null si solo se puso SL
+            public int   Quantity;
+        }
+
+        private readonly List<ProtPair> protectionPairs = new List<ProtPair>();
         private bool sawPosition;
 
         private sealed class Bracket
@@ -255,7 +269,6 @@ namespace NinjaTrader.NinjaScript.Indicators
             public bool   IsLong;
             public double StopPrice;      // 0 = sin SL
             public double TargetPrice;    // 0 = sin TP
-            public int    Protected;      // contratos ya cubiertos por un par OCO
         }
 
         #region Parametros
@@ -263,17 +276,17 @@ namespace NinjaTrader.NinjaScript.Indicators
         [NinjaScriptProperty]
         [Range(1, 100000)]
         [Display(Name = "Dif. en ticks", Order = 1, GroupName = "Operativa",
-                 Description = "Semilla de la entrada al seleccionar LMT/STP/STP LMT: la entrada arranca en mercado mas o menos esta distancia. A partir de ahi manda el clic o la caja.")]
+                 Description = "Semilla de la entrada al seleccionar LMT/STP/STP LMT: la entrada arranca en el mercado más o menos esa distancia. A partir de ahí manda el clic o la caja.")]
         public int StartOffsetTicks { get; set; }
 
         [NinjaScriptProperty]
         [Display(Name = "Cuenta", Order = 2, GroupName = "Operativa",
-                 Description = "Nombre de la cuenta a preseleccionar (por ejemplo Sim101). Vacio = la primera de la lista.")]
+                 Description = "Nombre de la cuenta a preseleccionar (por ejemplo Sim101). Vacío = la primera de la lista.")]
         public string PreferredAccount { get; set; }
 
         [NinjaScriptProperty]
         [Display(Name = "Confirmar antes de mandar", Order = 3, GroupName = "Operativa",
-                 Description = "Ensena contratos, niveles y riesgo real en un dialogo antes de enviar la orden.")]
+                 Description = "Enseña contratos, niveles y riesgo real en un diálogo antes de enviar la orden.")]
         public bool ConfirmOrders { get; set; }
 
         [NinjaScriptProperty]
@@ -285,7 +298,7 @@ namespace NinjaTrader.NinjaScript.Indicators
         [NinjaScriptProperty]
         [Range(0.1, 100)]
         [Display(Name = "R:R inicial", Order = 2, GroupName = "Riesgo",
-                 Description = "Relacion beneficio/riesgo con la que se siembra el TP al seleccionar un tipo de orden.")]
+                 Description = "Relación beneficio/riesgo con la que se siembra el TP al seleccionar un tipo de orden.")]
         public double StartRR { get; set; }
 
         [NinjaScriptProperty]
@@ -294,6 +307,22 @@ namespace NinjaTrader.NinjaScript.Indicators
                  Description = "Ticks a favor sobre el precio de entrada al mover el stop. Sirve para cubrir comisiones: cerrar ahi deja el neto en cero, no en negativo.")]
         public int BreakEvenOffsetTicks { get; set; }
 
+        [NinjaScriptProperty]
+        [Display(Name = "Usar stop loss", Order = 1, GroupName = "Protección",
+                 Description = "Estado inicial de la casilla SL. Apagada, las entradas salen sin stop, como una orden de toda la vida.")]
+        public bool StartUseStop { get; set; }
+
+        [NinjaScriptProperty]
+        [Display(Name = "Usar take profit", Order = 2, GroupName = "Protección",
+                 Description = "Estado inicial de la casilla TP. Apagada, las entradas salen sin objetivo.")]
+        public bool StartUseTarget { get; set; }
+
+        [NinjaScriptProperty]
+        [Range(200, 700)]
+        [Display(Name = "Ancho del panel (px)", Order = 5, GroupName = "Operativa",
+                 Description = "Ancho fijo del panel. Fijo a propósito: si dependiera del contenido, el panel se ensancharía y estrecharía cada vez que un precio cambia de número de dígitos.")]
+        public int PanelWidth { get; set; }
+
         #endregion
 
         protected override void OnStateChange()
@@ -301,7 +330,7 @@ namespace NinjaTrader.NinjaScript.Indicators
             if (State == State.SetDefaults)
             {
                 Name        = "AT Chart Trader";
-                Description = "Panel de operativa acoplado al Chart Trader: entradas MKT/LMT/STP/STP LMT colocadas en el grafico, dimensionado por riesgo, break-even automatico e interruptor de operativa.";
+                Description = "Panel de operativa acoplado al Chart Trader: entradas MKT/LMT/STP/STP LMT colocadas en el gráfico, dimensionado por riesgo, break-even automático e interruptor de operativa.";
                 Calculate   = Calculate.OnEachTick;
                 IsOverlay   = true;
                 IsChartOnly = true;
@@ -319,6 +348,9 @@ namespace NinjaTrader.NinjaScript.Indicators
                 StartRiskPct         = 0.5;
                 StartRR              = 2.0;
                 BreakEvenOffsetTicks = 2;
+                StartUseStop         = true;
+                StartUseTarget       = true;
+                PanelWidth           = 300;
             }
             else if (State == State.DataLoaded)
             {
@@ -411,12 +443,14 @@ namespace NinjaTrader.NinjaScript.Indicators
                           neutral, onLight, dash, font);
                 if (selKind == "STP LMT")
                     DrawLevel(chartScale, x0, x1, pxLimit,
-                              "Limite " + Fmt(pxLimit) + (bad == Slot.Limit ? BadZoneTag : ""),
+                              "Límite " + Fmt(pxLimit) + (bad == Slot.Limit ? BadZoneTag : ""),
                               neutral, onLight, dash, font);
+                if (useStop)
                 DrawLevel(chartScale, x0, x1, pxStop,
                           StopLabel("SL", pxStop, contracts, actualRisk, minForced)
                           + (bad == Slot.Stop ? BadZoneTag : ""),
                           red, onDark, dash, font);
+                if (useTarget)
                 DrawLevel(chartScale, x0, x1, pxTarget,
                           TargetLabel("TP", pxTarget, contracts)
                           + (bad == Slot.Target ? BadZoneTag : ""),
@@ -598,7 +632,7 @@ namespace NinjaTrader.NinjaScript.Indicators
         private static string SlotName(Slot s)
         {
             if (s == Slot.Entry)  return "Entrada";
-            if (s == Slot.Limit)  return "Limite";
+            if (s == Slot.Limit)  return "Límite";
             if (s == Slot.Stop)   return "SL";
             if (s == Slot.Target) return "TP";
             return "";
@@ -644,6 +678,11 @@ namespace NinjaTrader.NinjaScript.Indicators
                 BorderThickness = new Thickness(1),
                 Background = ThemeBrush(),
                 Margin = new Thickness(2, 6, 2, 4),
+                // Ancho FIJO. Con ancho automatico, cada cifra que cambia de
+                // numero de digitos (el precio, el P/L, el saldo) mueve las
+                // columnas y el panel entero tiembla varias veces por segundo.
+                // Fijandolo, lo que sobra se reparte dentro y nada se mueve.
+                Width = PanelWidth,
                 // Sin esto el marco se estira al alto de la fila y reparte los
                 // controles por toda la altura disponible.
                 VerticalAlignment = VerticalAlignment.Top
@@ -677,18 +716,20 @@ namespace NinjaTrader.NinjaScript.Indicators
             panel.Children.Add(BuildOffsetRow());
             panel.Children.Add(BuildKindGrid());
             panel.Children.Add(Separator());
+            // El riesgo va JUNTO a los botones de entrada: es lo que se mira
+            // antes de pulsar, no despues de colocar los niveles.
+            panel.Children.Add(BuildRiskRow());
+            panel.Children.Add(BuildQuantityRow());
+            panel.Children.Add(BuildRiskRealRow());
+            panel.Children.Add(Separator());
             panel.Children.Add(BuildPlacingRow());
             panel.Children.Add(BuildPriceRow("Entrada", out entryBox, Slot.Entry));
-            limitRow = (Grid)BuildPriceRow("Limite", out limitBox, Slot.Limit);
+            limitRow = (Grid)BuildPriceRow("Límite", out limitBox, Slot.Limit);
             limitRow.Visibility = Visibility.Collapsed;
             panel.Children.Add(limitRow);
             panel.Children.Add(BuildPriceRow("SL", out stopBox, Slot.Stop));
             panel.Children.Add(BuildPriceRow("TP", out targetBox, Slot.Target));
             panel.Children.Add(BuildRRRow());
-            panel.Children.Add(Separator());
-            panel.Children.Add(BuildRiskRow());
-            panel.Children.Add(BuildQuantityRow());
-            panel.Children.Add(BuildRiskRealRow());
             panel.Children.Add(Separator());
             panel.Children.Add(BuildBreakEvenRow());
             panel.Children.Add(Separator());
@@ -725,7 +766,7 @@ namespace NinjaTrader.NinjaScript.Indicators
             if (++panelAttempts > 20)
             {
                 StopRetry();
-                Log("AT Chart Trader: no aparece el Chart Trader de este grafico. Abrelo (clic derecho -> Chart Trader) y vuelve a anadir el indicador.",
+                Log("AT Chart Trader: no aparece el Chart Trader de este gráfico. Ábrelo (clic derecho -> Chart Trader) y vuelve a añadir el indicador.",
                     LogLevel.Warning);
                 return;
             }
@@ -832,10 +873,10 @@ namespace NinjaTrader.NinjaScript.Indicators
                 g.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
 
             balanceText = InfoRow("-", 0, g, "Saldo");
-            posText     = InfoRow("Plana", 1, g, "Posicion");
+            posText     = InfoRow("Plana", 1, g, "Posición");
             openPlText  = InfoRow("-", 2, g, "P/L abierto");
             dayPlText   = InfoRow("-", 3, g, "P/L realizado");
-            ordersText  = InfoRow("0", 4, g, "Ordenes vivas");
+            ordersText  = InfoRow("0", 4, g, "Órdenes vivas");
             return g;
         }
 
@@ -923,7 +964,7 @@ namespace NinjaTrader.NinjaScript.Indicators
         {
             placingText = new TextBlock
             {
-                Text = "Sin seleccion",
+                Text = "Sin selección",
                 FontSize = 11,
                 FontWeight = FontWeights.Bold,
                 Foreground = textBrush,
@@ -938,9 +979,28 @@ namespace NinjaTrader.NinjaScript.Indicators
         private UIElement BuildPriceRow(string caption, out PriceBox box, Slot slot)
         {
             Grid g = new Grid { Margin = new Thickness(0, 1, 0, 1) };
+            g.ColumnDefinitions.Add(Shared(UseGroup));
             g.ColumnDefinitions.Add(Shared(LabelGroup));
             g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
             g.ColumnDefinitions.Add(Shared(PinGroup));
+
+            // Casilla de encendido, solo en SL y TP. Apagada, esa proteccion no
+            // se dibuja, no se valida y no se manda: la entrada sale como una
+            // orden de toda la vida. Es lo que hace el panel nativo, y lo que
+            // faltaba para poder usar este igual cuando no quieres bracket.
+            if (slot == Slot.Stop || slot == Slot.Target)
+            {
+                CheckBox use = new CheckBox
+                {
+                    IsChecked = slot == Slot.Stop ? StartUseStop : StartUseTarget,
+                    VerticalAlignment = VerticalAlignment.Center,
+                    Margin = new Thickness(2, 0, 4, 0)
+                };
+                use.Checked   += OnUseProtectionChanged;
+                use.Unchecked += OnUseProtectionChanged;
+                g.Children.Add(use);
+                if (slot == Slot.Stop) useStopCheck = use; else useTargetCheck = use;
+            }
 
             Button lbl = new Button
             {
@@ -953,12 +1013,13 @@ namespace NinjaTrader.NinjaScript.Indicators
             };
             lbl.Click += OnSlotLabelClick;
             slotLabels[slot] = lbl;
+            Grid.SetColumn(lbl, 1);
             g.Children.Add(lbl);
 
             box = NewPriceBox(0, true);
             box.Tag = slot;
             box.ValueChanged += OnPriceValueChanged;
-            Grid.SetColumn(box, 1);
+            Grid.SetColumn(box, 2);
             g.Children.Add(box);
 
             // Solo SL y TP se pueden fijar. La entrada es la referencia y el
@@ -969,7 +1030,7 @@ namespace NinjaTrader.NinjaScript.Indicators
                 pin.Click += (slot == Slot.Stop)
                              ? new RoutedEventHandler(OnPinStopClick)
                              : new RoutedEventHandler(OnPinTargetClick);
-                Grid.SetColumn(pin, 2);
+                Grid.SetColumn(pin, 3);
                 g.Children.Add(pin);
                 if (slot == Slot.Stop) pinStopBtn = pin; else pinTargetBtn = pin;
             }
@@ -1146,10 +1207,13 @@ namespace NinjaTrader.NinjaScript.Indicators
             g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
             g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
 
-            Button cancel = SafeButton("Cancelar", "CANCEL");
+            // Dos acciones distintas, no una repetida: Cancelar toca las ordenes
+            // en el libro y deja la posicion, Cerrar todo cierra la posicion y de
+            // paso cancela lo que quede (Flatten hace las dos cosas).
+            Button cancel = SafeButton("Cancelar órdenes", "CANCEL");
             g.Children.Add(cancel);
 
-            Button flat = SafeButton("Cerrar y cancelar", "FLAT");
+            Button flat = SafeButton("Cerrar todo", "FLAT");
             Grid.SetColumn(flat, 1);
             g.Children.Add(flat);
             return g;
@@ -1185,6 +1249,13 @@ namespace NinjaTrader.NinjaScript.Indicators
                 TextWrapping = TextWrapping.Wrap,
                 Margin = new Thickness(2, 3, 2, 2)
             };
+            // El ancho se ata al del panel. Un TextBlock mide lo que ocupa su
+            // texto, y como la columna del Chart Trader se ajusta al contenido,
+            // un mensaje largo ensanchaba TODO el panel durante el segundo que
+            // duraba y lo devolvia al desaparecer: un temblor muy molesto.
+            // Atado, el texto parte en varias lineas en vez de empujar.
+            statusText.SetBinding(FrameworkElement.MaxWidthProperty,
+                                  new System.Windows.Data.Binding("ActualWidth") { Source = panel });
             return statusText;
         }
 
@@ -1215,6 +1286,7 @@ namespace NinjaTrader.NinjaScript.Indicators
         private const string ToggleGroupA = "atToggleA";
         private const string ToggleGroupB = "atToggleB";
         private const string PinGroup      = "atPin";
+        private const string UseGroup      = "atUse";
 
         private static ColumnDefinition Shared(string group)
         {
@@ -1224,6 +1296,7 @@ namespace NinjaTrader.NinjaScript.Indicators
         private static Grid TwoColumnRow()
         {
             Grid g = new Grid { Margin = new Thickness(0, 1, 0, 1) };
+            g.ColumnDefinitions.Add(Shared(UseGroup));
             g.ColumnDefinitions.Add(Shared(LabelGroup));
             g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
             return g;
@@ -1320,7 +1393,7 @@ namespace NinjaTrader.NinjaScript.Indicators
             // pero con Instrument asignado el control redondea el Value al tick
             // del instrumento aunque MasterInstrumentMode este apagado. La
             // prueba: la etiqueta del grafico mostraba "R:R 1,44" mientras la
-            // caja ensenaba "1,50" — 0,25 es el tick del MNQ.
+            // caja ensenaba "1,50" - 0,25 es el tick del MNQ.
             //
             // En Money no se notaba porque el paso son cientos de dolares y el
             // redondeo se pierde dentro. En % el paso ronda 0,4 y el redondeo se
@@ -1481,7 +1554,11 @@ namespace NinjaTrader.NinjaScript.Indicators
             Unsubscribe();
             lock (Account.All)
                 account = Account.All.FirstOrDefault(a => a.Name == name);
-            if (account != null) account.OrderUpdate += OnAccountOrderUpdate;
+            if (account != null)
+            {
+                account.OrderUpdate    += OnAccountOrderUpdate;
+                account.PositionUpdate += OnAccountPositionUpdate;
+            }
 
             // Cambiar de cuenta con la operativa armada dejaria un EXECUTE verde
             // apuntando a una cuenta que el usuario no ha revisado.
@@ -1492,10 +1569,14 @@ namespace NinjaTrader.NinjaScript.Indicators
 
         private void Unsubscribe()
         {
-            if (account != null) account.OrderUpdate -= OnAccountOrderUpdate;
+            if (account != null)
+            {
+                account.OrderUpdate    -= OnAccountOrderUpdate;
+                account.PositionUpdate -= OnAccountPositionUpdate;
+            }
             lock (pendingLock)
             {
-                protectionOrders.Clear();
+                protectionPairs.Clear();
                 sawPosition = false;
             }
 
@@ -1513,8 +1594,8 @@ namespace NinjaTrader.NinjaScript.Indicators
             // ponytail: aviso, no persistencia; si esto pasa a menudo, guardar
             // los brackets pendientes en disco y recuperarlos en State.Historical.
             if (orphans > 0)
-                Log("AT Chart Trader: " + orphans + " orden(es) de entrada siguen VIVAS en la cuenta y ya no recibiran SL/TP automatico. "
-                    + "Estan en la pestana Ordenes; cancelalas o protegelas a mano.",
+                Log("AT Chart Trader: " + orphans + " orden(es) de entrada siguen VIVAS en la cuenta y ya no recibirán SL/TP automático. "
+                    + "Están en la pestaña Órdenes; cancélalas o protégelas a mano.",
                     // Warning y no Alert: NinjaTrader pinta los Alert como cuadro
                     // de "Error", y esto no es un fallo, es la consecuencia de
                     // quitar el indicador con una entrada esperando. Aviso, no
@@ -1544,7 +1625,9 @@ namespace NinjaTrader.NinjaScript.Indicators
                 {
                     lastScanMs = nowMs;
                     ordersText.Text = DescribeWorkingOrders();
-                    CancelOrphanProtection(CurrentPosition());
+                    Position live = CurrentPosition();
+                    ReconcileProtection(live);
+                    CancelOrphanProtection(live);
                 }
 
                 Position p = positionCache;
@@ -1568,6 +1651,12 @@ namespace NinjaTrader.NinjaScript.Indicators
                 // arrastra SL y TP con ella. Sin arrastrarlos, la distancia al
                 // stop cambiaria sola con cada tick y el riesgo que se muestra
                 // dejaria de ser el que vas a correr.
+                // Sin seleccion no se llama a RefreshPlanBoxes (escribiria en la
+                // linea de estado 4 veces por segundo, borrando los mensajes),
+                // pero el estado de los botones SI tiene que seguir a la
+                // posicion. Por eso va aparte.
+                RefreshPositionUi();
+
                 if (selKind == "MKT")
                 {
                     FollowMarketEntry();
@@ -1589,18 +1678,127 @@ namespace NinjaTrader.NinjaScript.Indicators
         // Solo se cancela despues de haber VISTO la posicion abierta con esta
         // proteccion puesta. Si no, se cancelaria el par recien enviado en el
         // instante entre el fill y que la posicion aparezca.
+        // La posicion cambia por EVENTO, no cada segundo. Sin esto, entre cerrar
+        // parte de la posicion y que el barrido lo notara habia hasta UN SEGUNDO
+        // con la proteccion cubriendo mas contratos de los que quedan: si el stop
+        // salta en esa ventana no cierra nada, ABRE en contra por la diferencia.
+        private void OnAccountPositionUpdate(object sender, PositionEventArgs e)
+        {
+            if (e == null || e.Position == null || Instrument == null) return;
+            if (e.Position.Instrument == null
+             || e.Position.Instrument.FullName != Instrument.FullName) return;
+
+            Position p = e.MarketPosition == MarketPosition.Flat ? null : e.Position;
+            ReconcileProtection(p);
+            CancelOrphanProtection(p);
+        }
+
+        private static int PairQty(ProtPair p)
+        {
+            if (p.Stop != null && IsLive(p.Stop)) return p.Stop.Quantity;
+            if (p.Target != null && IsLive(p.Target)) return p.Target.Quantity;
+            return 0;
+        }
+
+        private static bool IsLive(Order o)
+        {
+            return o.OrderState == OrderState.Working
+                || o.OrderState == OrderState.Accepted
+                || o.OrderState == OrderState.Submitted
+                || o.OrderState == OrderState.TriggerPending;
+        }
+
+        // LA CANTIDAD DE LA PROTECCION SIGUE A LA DE LA POSICION. Es la misma
+        // regla que el AddOn AutomaticTradingNT8 aprendio a base de golpes: al
+        // ampliar protegia de menos, y al recortar protegia de MAS - y un
+        // bracket mayor que la posicion no cierra nada cuando salta, ABRE una
+        // posicion en sentido contrario.
+        //
+        // Se ajusta la orden viva con QuantityChanged en vez de cancelar y
+        // rehacer: cancelar deja un hueco de milisegundos sin proteccion, y en
+        // un camino de dinero ese hueco no compensa.
+        //
+        // De aqui salen gratis los tres casos: piramidar, cerrar parcial y el
+        // llenado parcial. Los tres son el mismo problema.
+        // LA PROTECCION NUNCA PUEDE CUBRIR MAS QUE LA POSICION. Menos si, y a
+        // proposito: se pueden llevar contratos sin proteger. Pero de mas no -
+        // un stop que cubre mas contratos de los que hay no cierra cuando salta,
+        // ABRE en contra por la diferencia. Es lo que el AddOn documento:
+        // "un bracket mayor que la posicion abre posicion en sentido contrario".
+        //
+        // Solo RECORTA. Ampliar seria decidir por el usuario que quiere proteger
+        // lo que dejo aposta sin proteger.
+        private void ReconcileProtection(Position position)
+        {
+            if (position == null) return;
+            int target = position.Quantity;
+            if (target <= 0) return;
+
+            List<Order> change = new List<Order>();
+            List<Order> cancel = new List<Order>();
+
+            lock (pendingLock)
+            {
+                int covered = 0;
+                foreach (ProtPair pair in protectionPairs) covered += PairQty(pair);
+                if (covered <= target) return;
+
+                // Se recorta por el final, que es el tramo mas reciente.
+                int excess = covered - target;
+                for (int i = protectionPairs.Count - 1; i >= 0 && excess > 0; i--)
+                {
+                    ProtPair pair = protectionPairs[i];
+                    int q = PairQty(pair);
+                    if (q <= 0) continue;
+
+                    // Las dos patas del par se tocan a la vez: recortar una sola
+                    // deja la otra cubriendo de mas y sin su OCO.
+                    if (q <= excess)
+                    {
+                        if (pair.Stop   != null && IsLive(pair.Stop))   cancel.Add(pair.Stop);
+                        if (pair.Target != null && IsLive(pair.Target)) cancel.Add(pair.Target);
+                        excess -= q;
+                    }
+                    else
+                    {
+                        int left = q - excess;
+                        if (pair.Stop   != null && IsLive(pair.Stop))   { pair.Stop.QuantityChanged   = left; change.Add(pair.Stop); }
+                        if (pair.Target != null && IsLive(pair.Target)) { pair.Target.QuantityChanged = left; change.Add(pair.Target); }
+                        excess = 0;
+                    }
+                }
+            }
+
+            try
+            {
+                if (cancel.Count > 0) account.Cancel(cancel);
+                if (change.Count > 0) account.Change(change);
+                Status("SL/TP recortado a " + target + "c.");
+            }
+            catch (Exception ex)
+            {
+                Status("No se pudo recortar el SL/TP: " + ex.Message
+                       + ". Hazlo a mano: protege más que la posición y al saltar abre en contra.");
+            }
+        }
+
         private void CancelOrphanProtection(Position position)
         {
             List<Order> doomed = null;
             lock (pendingLock)
             {
-                if (protectionOrders.Count == 0) { sawPosition = false; return; }
+                if (protectionPairs.Count == 0) { sawPosition = false; return; }
 
                 if (position != null) { sawPosition = true; return; }
                 if (!sawPosition) return;
 
-                doomed = new List<Order>(protectionOrders);
-                protectionOrders.Clear();
+                doomed = new List<Order>();
+                foreach (ProtPair pair in protectionPairs)
+                {
+                    if (pair.Stop   != null) doomed.Add(pair.Stop);
+                    if (pair.Target != null) doomed.Add(pair.Target);
+                }
+                protectionPairs.Clear();
                 sawPosition = false;
             }
 
@@ -1614,11 +1812,11 @@ namespace NinjaTrader.NinjaScript.Indicators
             try
             {
                 account.Cancel(live);
-                Status("Posicion cerrada por fuera: cancelado el SL/TP que quedaba suelto.");
+                Status("Posición cerrada por fuera: cancelado el SL/TP que quedaba suelto.");
             }
             catch (Exception ex)
             {
-                Status("No se pudo cancelar el SL/TP huerfano: " + ex.Message + ". Cancelalo a mano.");
+                Status("No se pudo cancelar el SL/TP huerfano: " + ex.Message + ". Cancélalo a mano.");
             }
         }
 
@@ -1749,8 +1947,25 @@ namespace NinjaTrader.NinjaScript.Indicators
             bool isLong = tag.StartsWith("B|");
             string kind = tag.Substring(2);
 
+            // Con posicion abierta, MKT no abre un plan: suma o resta en el
+            // acto, como el panel nativo. Ahi no hay nada que planear - el SL y
+            // el TP ya existen y su cantidad sigue sola a la posicion. Obligar a
+            // recolocarlos para sumar un contrato era pedir trabajo por nada.
+            //
+            // LMT, STP y STP LMT siguen con el plan aunque haya posicion: son
+            // ordenes en espera y necesitan un precio de todas formas.
+            // Instantaneo SOLO si no se quiere proteccion. Con SL o TP marcados,
+            // MKT abre el plan aunque ya haya posicion: es la unica forma de
+            // anadir un tramo CON su propio SL y TP. Las casillas son el
+            // interruptor entre los dos modos.
+            if (kind == "MKT" && !useStop && !useTarget)
+            {
+                Position open = CurrentPosition();
+                if (open != null) { ScalePosition(isLong, open); return; }
+            }
+
             // Volver a pulsar el mismo boton cancela la seleccion.
-            if (selKind == kind && selLong == isLong) { ClearSelection("Seleccion cancelada."); return; }
+            if (selKind == kind && selLong == isLong) { ClearSelection("Selección cancelada."); return; }
 
             selKind = kind;
             selLong = isLong;
@@ -1762,6 +1977,48 @@ namespace NinjaTrader.NinjaScript.Indicators
 
         // Siembra un plan completo. Nunca deja un campo vacio: se puede ejecutar
         // sin tocar el grafico, y cada clic solo corrige lo que ya hay.
+        // Suma o resta contratos sobre una posicion ya abierta. La cantidad es
+        // la de la caja Contratos.
+        private void ScalePosition(bool buySide, Position p)
+        {
+            // Puede AUMENTAR riesgo, asi que pasa por el interruptor. Reducir no
+            // lo necesitaria, pero es el mismo boton y prefiero una regla sola a
+            // que dependa de en que lado estes.
+            if (!armed) { Status("Operativa desarmada. Arma para añadir o reducir."); return; }
+            if (account == null || Instrument == null) return;
+
+            bool positionIsLong = p.MarketPosition == MarketPosition.Long;
+            bool adding = buySide == positionIsLong;
+
+            int n = Math.Max(1, qtyBox != null ? qtyBox.Value : 1);
+            // Reduciendo, nunca mas de lo que hay: pasarse no cierra de mas, DA
+            // LA VUELTA a la posicion. El panel nativo si te deja darle la
+            // vuelta sin avisar; aqui no.
+            if (!adding) n = Math.Min(n, p.Quantity);
+            if (n < 1) return;
+
+            OrderAction action = positionIsLong
+                                 ? (buySide ? OrderAction.Buy : OrderAction.Sell)
+                                 : (buySide ? OrderAction.BuyToCover : OrderAction.SellShort);
+
+            try
+            {
+                Order o = account.CreateOrder(Instrument, action, OrderType.Market, OrderEntry.Manual,
+                                              TimeInForce.Day, n, 0, 0, string.Empty,
+                                              adding ? "AT Sumar" : "AT Restar",
+                                              Core.Globals.MaxDate, null);
+                account.Submit(new[] { o });
+
+                int after = adding ? p.Quantity + n : p.Quantity - n;
+                Status((adding ? "+" : "-") + n + "  " + p.Quantity + " -> " + after + "c"
+                       + (adding ? "   (el SL no se mueve: arriesgas mas)" : ""));
+            }
+            catch (Exception ex)
+            {
+                Status("Error al ajustar la posición: " + ex.Message);
+            }
+        }
+
         private void SeedPlan()
         {
             double market = selLong ? AskPrice() : BidPrice();
@@ -1796,8 +2053,8 @@ namespace NinjaTrader.NinjaScript.Indicators
             placeQueue.Clear();
             if (selKind == "LMT" || selKind == "STP") placeQueue.Add(Slot.Entry);
             if (selKind == "STP LMT") { placeQueue.Add(Slot.Entry); placeQueue.Add(Slot.Limit); }
-            placeQueue.Add(Slot.Stop);
-            if (!pinRR) placeQueue.Add(Slot.Target);
+            if (useStop) placeQueue.Add(Slot.Stop);
+            if (useTarget && !pinRR) placeQueue.Add(Slot.Target);
             queueIndex = 0;
         }
 
@@ -1806,7 +2063,9 @@ namespace NinjaTrader.NinjaScript.Indicators
             if (reset)
             {
                 BuildQueue();
-                placing = placeQueue[0];
+                // Con SL y TP apagados no queda nada que colocar: un MKT a pelo
+                // se ejecuta sin pedir un solo clic en el grafico.
+                placing = placeQueue.Count > 0 ? placeQueue[0] : Slot.None;
                 return;
             }
 
@@ -1837,6 +2096,14 @@ namespace NinjaTrader.NinjaScript.Indicators
         // Fijar un nivel y fijar el ratio son incompatibles: al activar uno se
         // apaga el otro. Si no, no habria forma de saber cual manda cuando el
         // usuario mueve el SL.
+        private void OnUseProtectionChanged(object sender, RoutedEventArgs e)
+        {
+            useStop   = useStopCheck   == null || useStopCheck.IsChecked   == true;
+            useTarget = useTargetCheck == null || useTargetCheck.IsChecked == true;
+            RefreshPlanBoxes();
+            InvalidateChart();
+        }
+
         private void OnPinStopClick(object sender, RoutedEventArgs e)
         {
             pinStop = !pinStop;
@@ -2146,9 +2413,15 @@ namespace NinjaTrader.NinjaScript.Indicators
             actualRisk = 0;
             if (Instrument == null) return 0;
 
-            double dist = Math.Abs(EffectiveEntry() - stopPrice);
+            // Sin SL no hay distancia, asi que no hay riesgo por contrato con el
+            // que calcular nada: la cantidad solo puede ser manual.
+            double dist = useStop ? Math.Abs(EffectiveEntry() - stopPrice) : 0;
             double perContract = dist * Instrument.MasterInstrument.PointValue;
-            if (perContract <= 0) return 0;
+            if (perContract <= 0)
+            {
+                if (!inQtyManual) return 0;
+                return Math.Max(1, inManualQty);
+            }
 
             int n;
             if (inQtyManual)
@@ -2177,10 +2450,12 @@ namespace NinjaTrader.NinjaScript.Indicators
         private string Validate(int contracts)
         {
             if (account == null) return "Sin cuenta seleccionada.";
-            if (account.ConnectionStatus != ConnectionStatus.Connected) return "La cuenta no esta conectada.";
+            if (account.ConnectionStatus != ConnectionStatus.Connected) return "La cuenta no está conectada.";
             if (selKind == null) return "Selecciona un tipo de orden.";
             if (Instrument == null) return "Sin instrumento.";
-            if (contracts < 1) return "Contratos invalidos.";
+            if (!useStop && !inQtyManual)
+                return "Sin SL no se puede dimensionar por riesgo: pon Contratos en Manual.";
+            if (contracts < 1) return "Contratos inválidos.";
 
             double entry = EffectiveEntry();
             double market = LastPrice();
@@ -2192,11 +2467,13 @@ namespace NinjaTrader.NinjaScript.Indicators
             // habla de otra operacion en vez de parecer que el panel se equivoca.
             string who = (selLong ? "COMPRA " : "VENTA ") + selKind + ": ";
 
-            if (Math.Abs(entry - pxStop) < tick) return who + "el SL esta a menos de un tick de la entrada.";
-
-            if (selLong && pxStop >= entry)  return who + "el SL debe ir POR DEBAJO de la entrada.";
-            if (!selLong && pxStop <= entry) return who + "el SL debe ir POR ENCIMA de la entrada.";
-            if (pxTarget > 0)
+            if (useStop)
+            {
+                if (Math.Abs(entry - pxStop) < tick) return who + "el SL está a menos de un tick de la entrada.";
+                if (selLong && pxStop >= entry)  return who + "el SL debe ir POR DEBAJO de la entrada.";
+                if (!selLong && pxStop <= entry) return who + "el SL debe ir POR ENCIMA de la entrada.";
+            }
+            if (useTarget && pxTarget > 0)
             {
                 if (selLong && pxTarget <= entry)  return who + "el TP debe ir POR ENCIMA de la entrada.";
                 if (!selLong && pxTarget >= entry) return who + "el TP debe ir POR DEBAJO de la entrada.";
@@ -2215,9 +2492,9 @@ namespace NinjaTrader.NinjaScript.Indicators
 
             if (selKind == "STP LMT")
             {
-                if (pxLimit <= 0) return who + "falta el precio limite.";
-                if (selLong && pxLimit < entry)  return who + "el limite va en el stop o POR ENCIMA.";
-                if (!selLong && pxLimit > entry) return who + "el limite va en el stop o POR DEBAJO.";
+                if (pxLimit <= 0) return who + "falta el precio límite.";
+                if (selLong && pxLimit < entry)  return who + "el límite va en el stop o POR ENCIMA.";
+                if (!selLong && pxLimit > entry) return who + "el límite va en el stop o POR DEBAJO.";
             }
 
             return null;
@@ -2233,13 +2510,7 @@ namespace NinjaTrader.NinjaScript.Indicators
             ReadInputs();
 
             bool sel = selKind != null;
-            foreach (Button b in kindButtons)
-            {
-                string tag = b.Tag as string;
-                bool active = sel && tag == (selLong ? "B|" : "S|") + selKind;
-                b.Opacity = active ? 1.0 : (sel ? 0.35 : 0.55);
-                b.BorderThickness = new Thickness(active ? 2 : 1);
-            }
+            RefreshPositionUi();
 
             if (limitRow != null)
                 limitRow.Visibility = (sel && selKind == "STP LMT") ? Visibility.Visible : Visibility.Collapsed;
@@ -2253,7 +2524,10 @@ namespace NinjaTrader.NinjaScript.Indicators
             entryBox.IsEnabled = sel && selKind != "MKT";
             // Con el ratio fijado el TP se deriva del SL: deja de ser editable y
             // de ser colocable, igual que los contratos en modo Auto.
-            targetBox.IsEnabled = sel && !pinRR;
+            stopBox.IsEnabled   = sel && useStop;
+            targetBox.IsEnabled = sel && !pinRR && useTarget;
+            if (pinStopBtn   != null) pinStopBtn.IsEnabled   = useStop;
+            if (pinTargetBtn != null) pinTargetBtn.IsEnabled = useTarget && !pinRR;
             if (sel && !pinRR) SetValue(rrBox, Math.Round(CurrentRR(), 2));
             else if (!sel) SetValue(rrBox, 0);
 
@@ -2320,10 +2594,6 @@ namespace NinjaTrader.NinjaScript.Indicators
                 ? "-" + actualRisk.ToString("N2", CultureInfo.CurrentCulture)
                 : (sel ? "-" : "sin plan");
 
-            placingText.Text = !sel
-                ? "Sin seleccion"
-                : (selLong ? "COMPRA " : "VENTA ") + selKind + "   Coloca: " + SlotName(placing);
-            placingText.Foreground = sel ? (selLong ? BuyBrush : SellBrush) : textBrush;
 
             string problem = sel ? Validate(contracts) : "Selecciona un tipo de orden.";
             planValid = sel && problem == null;
@@ -2339,8 +2609,8 @@ namespace NinjaTrader.NinjaScript.Indicators
             // en pantalla contradiciendo al boton EXECUTE, que ya estaba verde.
             string mismatch = AccountMatchesChart()
                               ? ""
-                              : "OJO: el grafico esta en " + ChartAccountName() + ". Las ordenes de "
-                                + (account != null ? account.Name : "?") + " no se dibujan aqui. ";
+                              : "OJO: el gráfico está en " + ChartAccountName() + ". Las órdenes de "
+                                + (account != null ? account.Name : "?") + " no se dibujan aquí. ";
 
             if (problem != null)
                 Status(mismatch + problem);
@@ -2357,6 +2627,58 @@ namespace NinjaTrader.NinjaScript.Indicators
             if (b == null) return;
             b.BorderBrush     = active ? OnBrush : Brushes.Transparent;
             b.BorderThickness = new Thickness(active ? 2 : 1);
+        }
+
+        // Todo lo que depende de si HAY POSICION, aparte. Se llama en cada
+        // refresco, no solo cuando hay un plan seleccionado: sin seleccion -que
+        // es justo como quedas despues de ejecutar- RefreshPlanBoxes no se
+        // llamaba nunca mas, y los botones se quedaban con el estado del
+        // instante del EXECUTE, cuando la posicion todavia no existia.
+        private void RefreshPositionUi()
+        {
+            if (panel == null) return;
+
+            bool sel = selKind != null;
+            Position pos = positionCache;
+
+            foreach (Button b in kindButtons)
+            {
+                string tag = b.Tag as string;
+                if (tag == null) continue;
+                bool active   = sel && tag == (selLong ? "B|" : "S|") + selKind;
+                bool isBuyBtn = tag.StartsWith("B|");
+                bool isMkt    = tag == "B|MKT" || tag == "S|MKT";
+
+                // Con posicion abierta los MKT actuan al instante: encendidos y
+                // con el signo de lo que le hacen A TU POSICION. En un corto,
+                // vender SUMA, y ponerle un menos seria mentira.
+                if (isMkt && pos != null)
+                {
+                    bool adds = isBuyBtn == (pos.MarketPosition == MarketPosition.Long);
+                    b.Content = adds ? "MKT  +" : "MKT  -";
+                    b.Opacity = 1.0;
+                    b.BorderThickness = new Thickness(1);
+                    continue;
+                }
+
+                if (isMkt) b.Content = "MKT";
+                b.Opacity = active ? 1.0 : (sel ? 0.35 : 0.55);
+                b.BorderThickness = new Thickness(active ? 2 : 1);
+            }
+
+            placingText.Text = sel
+                ? (selLong ? "COMPRA " : "VENTA ") + selKind + "   Coloca: " + SlotName(placing)
+                : (pos != null
+                   ? (!useStop && !useTarget
+                      ? "MKT abierta: pulsar añade o reduce contratos"
+                      : "SL/TP marcados: MKT abre plan para el tramo nuevo")
+                   : "Sin selección");
+            placingText.Foreground = sel ? (selLong ? BuyBrush : SellBrush)
+                                         : (pos != null ? WarnBrush : textBrush);
+
+            // Con posicion abierta la caja de Contratos es el tamano del ajuste,
+            // asi que tiene que poder tocarse aunque el riesgo mande.
+            if (pos != null) qtyBox.IsEnabled = true;
         }
 
         private static void Highlight(Button b, bool active)
@@ -2468,7 +2790,7 @@ namespace NinjaTrader.NinjaScript.Indicators
                 if (!warnedCoords)
                 {
                     warnedCoords = true;
-                    Log("AT Chart Trader: el precio bajo el raton cae fuera de la escala visible. La colocacion por clic queda desactivada; usa las cajas del panel.",
+                    Log("AT Chart Trader: el precio bajo el ratón cae fuera de la escala visible. La colocación por clic queda desactivada; usa las cajas del panel.",
                         LogLevel.Warning);
                 }
                 return false;
@@ -2524,7 +2846,7 @@ namespace NinjaTrader.NinjaScript.Indicators
         {
             if (e.Key == Key.Escape && selKind != null)
             {
-                ClearSelection("Seleccion cancelada.");
+                ClearSelection("Selección cancelada.");
                 e.Handled = true;
             }
         }
@@ -2553,7 +2875,7 @@ namespace NinjaTrader.NinjaScript.Indicators
         {
             if (e.Key == Key.Escape && selKind != null)
             {
-                ClearSelection("Seleccion cancelada.");
+                ClearSelection("Selección cancelada.");
                 e.Handled = true;
                 return;
             }
@@ -2612,8 +2934,8 @@ namespace NinjaTrader.NinjaScript.Indicators
             string tag = b.Tag as string;
             try
             {
-                if (tag == "CANCEL") { account.CancelAllOrders(Instrument); Status("Cancelacion enviada."); }
-                else if (tag == "FLAT") { account.Flatten(new[] { Instrument }); Status("Cierre y cancelacion enviados."); }
+                if (tag == "CANCEL") { account.CancelAllOrders(Instrument); Status("Cancelación enviada."); }
+                else if (tag == "FLAT") { account.Flatten(new[] { Instrument }); Status("Cierre y cancelación enviados."); }
             }
             catch (Exception ex)
             {
@@ -2634,7 +2956,7 @@ namespace NinjaTrader.NinjaScript.Indicators
             string problem = Validate(contracts);
             if (problem != null) { Status(problem); return; }
 
-            if (ConfirmOrders && !Confirm(contracts, actualRisk, minForced)) { Status("Envio cancelado."); return; }
+            if (ConfirmOrders && !Confirm(contracts, actualRisk, minForced)) { Status("Envío cancelado."); return; }
 
             try
             {
@@ -2654,8 +2976,14 @@ namespace NinjaTrader.NinjaScript.Indicators
                                                   "AT " + (selLong ? "Compra " : "Venta ") + selKind,
                                                   Core.Globals.MaxDate, null);
 
-                lock (pendingLock)
-                    pending[entry] = new Bracket { IsLong = selLong, StopPrice = pxStop, TargetPrice = pxTarget };
+                // Solo se apunta el bracket si hay algo que proteger. Con las dos
+                // casillas apagadas la entrada sale sola, como una orden de toda
+                // la vida, y no queda nada esperando su fill.
+                double bStop   = useStop   ? pxStop   : 0;
+                double bTarget = useTarget ? pxTarget : 0;
+                if (bStop > 0 || bTarget > 0)
+                    lock (pendingLock)
+                        pending[entry] = new Bracket { IsLong = selLong, StopPrice = bStop, TargetPrice = bTarget };
 
                 account.Submit(new[] { entry });
                 Status((selLong ? "Compra " : "Venta ") + selKind + " x" + contracts + " enviada.");
@@ -2671,9 +2999,9 @@ namespace NinjaTrader.NinjaScript.Indicators
         {
             string msg = (selLong ? "COMPRA " : "VENTA ") + selKind + "\n"
                        + Instrument.FullName + "   " + account.Name + "\n\n"
-                       + "Contratos: " + contracts + (minForced ? "  (MINIMO 1: arriesga mas de lo pedido)" : "") + "\n"
+                       + "Contratos: " + contracts + (minForced ? "  (MÍNIMO 1: arriesga más de lo pedido)" : "") + "\n"
                        + "Entrada:   " + Fmt(EffectiveEntry()) + "\n"
-                       + (selKind == "STP LMT" ? "Limite:    " + Fmt(pxLimit) + "\n" : "")
+                       + (selKind == "STP LMT" ? "Límite:    " + Fmt(pxLimit) + "\n" : "")
                        + "SL:        " + Fmt(pxStop) + "\n"
                        + "TP:        " + Fmt(pxTarget) + "\n"
                        + "R:R:       " + CurrentRR().ToString("0.00") + "\n\n"
@@ -2694,9 +3022,16 @@ namespace NinjaTrader.NinjaScript.Indicators
 
             if (dead)
                 lock (pendingLock)
-                    for (int i = protectionOrders.Count - 1; i >= 0; i--)
-                        if (ReferenceEquals(protectionOrders[i], e.Order))
-                            protectionOrders.RemoveAt(i);
+                    for (int i = protectionPairs.Count - 1; i >= 0; i--)
+                    {
+                        ProtPair pair = protectionPairs[i];
+                        if (ReferenceEquals(pair.Stop, e.Order))   pair.Stop = null;
+                        if (ReferenceEquals(pair.Target, e.Order)) pair.Target = null;
+                        // Par sin ninguna pata viva: fuera de la lista.
+                        if ((pair.Stop == null || !IsLive(pair.Stop))
+                         && (pair.Target == null || !IsLive(pair.Target)))
+                            protectionPairs.RemoveAt(i);
+                    }
 
             // PartFilled cuenta. Una entrada llenada a medias es una posicion
             // REAL y abierta: si solo se atendiera Filled, esos contratos se
@@ -2719,21 +3054,24 @@ namespace NinjaTrader.NinjaScript.Indicators
                 if (terminal) pending.Remove(e.Order);
             }
 
-            int filled     = e.Order.Filled;
-            int unprotected = filled - bracket.Protected;
+            int filled = e.Order.Filled;
 
-            if (unprotected > 0)
+            // Cada tramo protegido lleva SU par. Se probo a mantener uno solo
+            // creciendo con la posicion, pero eso impide lo que se pide ahora:
+            // llevar 6 contratos sin proteger y anadir 3 con SL y TP. La regla
+            // que queda es la de seguridad, no la de cantidad exacta: la
+            // proteccion puede cubrir MENOS que la posicion, nunca mas.
+            if (filled > 0)
             {
                 Account acc = sender as Account ?? account;
-                if (acc != null && SubmitProtection(acc, e.Order, bracket, unprotected))
-                    bracket.Protected += unprotected;
+                if (acc != null) SubmitProtection(acc, e.Order, bracket, filled);
             }
 
             if (terminal && filled == 0)
                 Status("Entrada " + (e.OrderState == OrderState.Cancelled ? "cancelada" : "rechazada") + ".");
             else if (terminal && e.OrderState != OrderState.Filled)
                 Status("Entrada " + (e.OrderState == OrderState.Cancelled ? "cancelada" : "rechazada")
-                       + " con " + filled + " contrato(s) llenos. Esa posicion SI queda protegida.");
+                       + " con " + filled + " contrato(s) llenos. Esa posición SÍ queda protegida.");
             else if (partial)
                 Status("Llenado parcial: " + filled + " de " + e.Order.Quantity + " protegidos.");
         }
@@ -2771,22 +3109,29 @@ namespace NinjaTrader.NinjaScript.Indicators
                 // compartido no empareja nada y algunos brokers lo rechazan.
                 string oco = (stopPrice > 0 && targetPrice > 0) ? Guid.NewGuid().ToString("N") : string.Empty;
 
+                ProtPair pair = new ProtPair { Quantity = quantity };
                 List<Order> exits = new List<Order>();
                 if (stopPrice > 0)
-                    exits.Add(acc.CreateOrder(instrument, exit, OrderType.StopMarket, OrderEntry.Manual, TimeInForce.Day,
-                                              quantity, 0, stopPrice, oco, "AT SL", Core.Globals.MaxDate, null));
+                {
+                    pair.Stop = acc.CreateOrder(instrument, exit, OrderType.StopMarket, OrderEntry.Manual, TimeInForce.Day,
+                                                quantity, 0, stopPrice, oco, "AT SL", Core.Globals.MaxDate, null);
+                    exits.Add(pair.Stop);
+                }
                 if (targetPrice > 0)
-                    exits.Add(acc.CreateOrder(instrument, exit, OrderType.Limit, OrderEntry.Manual, TimeInForce.Day,
-                                              quantity, targetPrice, 0, oco, "AT TP", Core.Globals.MaxDate, null));
+                {
+                    pair.Target = acc.CreateOrder(instrument, exit, OrderType.Limit, OrderEntry.Manual, TimeInForce.Day,
+                                                  quantity, targetPrice, 0, oco, "AT TP", Core.Globals.MaxDate, null);
+                    exits.Add(pair.Target);
+                }
 
                 acc.Submit(exits);
                 lock (pendingLock)
                 {
-                    // Se ACUMULAN, no se reemplazan: con llenados parciales hay
-                    // un par OCO por tramo, y todos tienen que seguir vigilados.
-                    protectionOrders.AddRange(exits);
+                    // Se ACUMULAN: cada tramo protegido lleva su par, y puede
+                    // haber contratos sin proteger conviviendo con ellos.
+                    protectionPairs.Add(pair);
                 }
-                Status("Proteccion enviada: " + quantity + "c sobre fill " + Fmt(fill) + ".");
+                Status("Protección enviada: " + quantity + "c sobre fill " + Fmt(fill) + ".");
                 return true;
             }
             catch (Exception ex)
@@ -2849,10 +3194,10 @@ namespace NinjaTrader.NinjaScript.Indicators
             // posicion con su stop original.
             List<Order> move = new List<Order>();
             lock (pendingLock)
-                foreach (Order o in protectionOrders)
+                foreach (ProtPair pair in protectionPairs)
                 {
-                    if (o.OrderType != OrderType.StopMarket) continue;
-                    if (o.OrderState != OrderState.Working && o.OrderState != OrderState.Accepted) continue;
+                    Order o = pair.Stop;
+                    if (o == null || !IsLive(o)) continue;
                     // Nunca hacia atras: el break-even solo mejora el stop.
                     if (o.StopPrice > 0 && (isLong ? bePrice <= o.StopPrice : bePrice >= o.StopPrice)) continue;
                     move.Add(o);
@@ -2867,7 +3212,7 @@ namespace NinjaTrader.NinjaScript.Indicators
             }
             catch (Exception ex)
             {
-                Status("Break-even fallo: " + ex.Message);
+                Status("Break-even falló: " + ex.Message);
             }
         }
 
@@ -2885,7 +3230,7 @@ namespace NinjaTrader.NinjaScript.Indicators
             armed = value;
             UpdateArmVisuals();
             RefreshPlanBoxes();
-            Status(reason ?? (armed ? "Operativa ARMADA: EXECUTE manda ordenes reales." : "Operativa desarmada."));
+            Status(reason ?? (armed ? "Operativa ARMADA: EXECUTE manda órdenes reales." : "Operativa desarmada."));
         }
 
         private void UpdateArmVisuals()

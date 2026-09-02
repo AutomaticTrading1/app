@@ -32,9 +32,9 @@
       "platform": "nt8",
       "kind": "Indicators",
       "file": "AT_ChartTrader.cs",
-      "version": "1.0",
-      "sha256": "e449fc8a4bfe6cdcbb08e74605872b730fba28cf96de8161defdccbc53b5b42d",
-      "notes": "Panel de operativa acoplado al Chart Trader de NinjaTrader. Anade lo que NT8 no trae como boton: entradas LMT, STP y STP LMT colocadas con el raton sobre el grafico, y tamano de posicion calculado por riesgo (porcentaje de la cuenta o dinero fijo) a partir de la distancia al stop. El SL y el TP se ponen como precios en el grafico, ensenan en vivo lo que se arriesga y lo que se gana mientras se mueven, y se envian como par OCO cuando la entrada se llena, tambien si se llena a medias. Incluye break-even automatico y cancela el SL/TP que queda suelto si la posicion se cierra por fuera. La operativa arranca DESARMADA: sin armarla, el boton EXECUTE no manda nada. Necesita el Chart Trader del grafico abierto. Tras instalarlo hay que recompilar en NinjaScript (F5)."
+      "version": "1.1",
+      "sha256": "302f8c213d33e0dcdc389ba2e30f8236eafba47fab5ac2569517986238c3d16c",
+      "notes": "Panel de operativa acoplado al Chart Trader de NinjaTrader. Anade lo que NT8 no trae como boton: entradas LMT, STP y STP LMT colocadas con el raton sobre el grafico, y tamano de posicion calculado por riesgo (porcentaje de la cuenta o dinero fijo) a partir de la distancia al stop. El SL y el TP se ponen como precios en el grafico y ensenan en vivo lo que se arriesga y lo que se gana mientras se mueven. NOVEDADES 1.1: con una posicion ya abierta, los botones MKT anaden o reducen contratos al instante, con su signo + o - segun lo que le hagan a TU posicion. Las casillas SL y TP se pueden apagar para mandar una orden de toda la vida, sin bracket; marcadas, MKT abre plan y el tramo nuevo sale con SU propio SL y TP, asi que se pueden llevar contratos protegidos y sin proteger a la vez. La proteccion nunca cubre mas contratos de los que hay abiertos: si se cierra parte de la posicion se recorta sola, porque un stop que cubre de mas no cierra al saltar, abre en contra. Ancho del panel fijo y configurable, para que no tiemble cuando el precio cambia de numero de digitos. Break-even automatico, cancelacion del SL/TP que queda suelto si la posicion se cierra por fuera, y un interruptor de operativa que arranca desarmado. Necesita el Chart Trader del grafico abierto. Tras instalarlo hay que recompilar en NinjaScript (F5)."
     },
     {
       "platform": "nt8",
