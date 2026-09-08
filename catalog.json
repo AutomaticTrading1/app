@@ -4,9 +4,9 @@
       "platform": "mt5",
       "kind": "Experts",
       "file": "AT_OrderFlow_Footprint.ex5",
-      "version": "4.32",
-      "sha256": "fde987f8d895fc58d22478f7401a811a0745d9a3fb5ab3aec311e2f91f48fa59",
-      "notes": "Footprint de order flow y multiherramientas.",
+      "version": "4.33",
+      "sha256": "501d7f3d9c34134eaed3e2cc75e963cb4201a4ebb2560cf0b21d7cbf24b5d2bf",
+      "notes": "Nuevo indicador de maximos y minimos de sesiones.",
       "min_app": "1.6",
       "manual": "AT_OrderFlow_Footprint.md"
     },
