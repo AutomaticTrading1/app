@@ -1,6 +1,6 @@
 # Manual de usuario — AT OrderFlow Footprint
 
-Versión: 4.32+.
+Versión: 4.33+.
 
 Guía de **uso**: qué ves en pantalla, qué hace cada botón y para qué sirve.
 No hay código aquí.
@@ -172,11 +172,14 @@ VP, Table y Header**; el resto lo enciendes tú.
 | **DeMark** | Pivotes DeMark: **solo PP, R1 y S1** | Cuando quieres una única referencia limpia |
 | **Murrey** | Murrey Math: las 13 líneas de 0/8 a 8/8 (más ±1/8, ±2/8) | Marco de precio "cuadriculado" |
 | **VolPiv** | Volatility pivot: **una** línea que camina con el precio | Como stop dinámico / filtro de tendencia |
+| **Session** | Máximo y mínimo de la última sesión cerrada de Asia, Londres y Nueva York | Para operar contra el rango de la sesión anterior |
 
-**Las ocho son independientes: enciende las que uses y apaga el resto.** Con cuatro
+**Las nueve son independientes: enciende las que uses y apaga el resto.** Con cuatro
 familias a la vez el gráfico se llena de líneas y las etiquetas de la izquierda se
 pisan. Cada etiqueta lleva prefijo para saber de quién es: `F`=Fibo, `C`=Camarilla,
-`W`=Woodie, `D`=DeMark, `M`=Murrey, `R`=Round.
+`W`=Woodie, `D`=DeMark, `M`=Murrey, `R`=Round. **Session** es la excepción: sus
+etiquetas van pegadas al **borde derecho** y se nombran solas (`ASIA H`, `LON L`,
+`NY H`…), así que no se pisan con las demás.
 
 Detalle de qué mira cada una:
 
@@ -193,6 +196,10 @@ Detalle de qué mira cada una:
 - **VolPiv** — las velas de la **temporalidad que tengas puesta**. No es un nivel
   fijo: es un stop por volatilidad que persigue al precio y solo se aprieta. **Verde**
   = el precio está por encima (sesgo alcista) · **rojo** = por debajo.
+- **Session** — la **última sesión ya cerrada** de cada plaza, mirada en velas de 5
+  minutos (no en la temporalidad del gráfico: en H1 se perdería el corte de las 09:30
+  de Nueva York). Seis líneas, un par por plaza, cada una del color que esa plaza
+  tiene en la tira de sesión. Ver el detalle en **5.6**.
 
 #### La fila `Paso` (zonas redondas)
 
@@ -315,6 +322,13 @@ El botón abre una tarjeta con las cuatro formas y la actual resaltada.
   que cualquier panel.
 - **CVD** — delta acumulado. Lo que se busca es la **divergencia**: precio hace máximo más alto,
   CVD no.
+- **Tira de sesión** (botón **Session** de **Paneles**) — una banda de color por bloque de
+  columnas: `ASIA`, `LON`, `NY` y los solapes `ASIA&LON` / `LON&NY`, que se muestran a
+  propósito porque son las horas de más volumen. A la izquierda, la leyenda dice el desfase
+  del broker que está usando: **`Ses GMT+3`** medido en el histórico de velas del propio
+  broker · **`Ses GMT+3~`** deducido del reloj del PC, porque no hay histórico H1 del
+  símbolo de referencia · **`Ses GMT+3*`** fijado a mano en las propiedades. Si la tira
+  pareciera desplazada, ese número dice al momento si el problema es la medición.
 
 ### 5.5 Panel CHART ANALYST, línea a línea
 
@@ -371,6 +385,21 @@ presión agresiva acumulada de las últimas ~8 velas, normalizadas al lado más 
   del gráfico (hasta ~65 puntos en US100) y afectaba a **todo** lo dibujado sobre precio
   — niveles, velas, VP/POC/VAH/VAL, estructura, medias y las líneas de plan del panel
   TRADE.
+- **Máximos y mínimos de sesión** (botón **Session** de la fila **Niveles**, no
+  confundir con el **Session** de **Paneles**, que es la tira de colores de abajo) —
+  seis líneas: `ASIA H` / `ASIA L`, `LON H` / `LON L`, `NY H` / `NY L`, cada par del
+  color de su plaza. **La etiqueta va a la derecha**, al final de la línea, al
+  contrario que el resto de familias de niveles.
+  - **Solo sesiones cerradas.** La sesión que está corriendo ahora no se pinta: su
+    máximo y su mínimo todavía se están haciendo. En cuanto cierra, aparece.
+  - **La sesión de una plaza incluye sus solapes.** El rango de Nueva York arranca en
+    su apertura (09:30 ET), con Londres todavía operando, y llega hasta su cierre.
+    Recortarlo a las horas en que Nueva York estaba **sola** dejaría fuera las dos
+    horas y media de la apertura, que es donde se mueve el precio.
+  - **No hay niveles de solape.** No existe `ASIA&LON` ni `LON&NY` como sesión propia:
+    esas horas cuentan para las dos plazas que las comparten, y nada más.
+  - Si una plaza no sale, es que el histórico de M5 no llega a cubrir su última sesión
+    completa. Se prefiere no dibujar nada antes que dibujar un rango truncado.
 - **PDH / PDL** — máximo (naranja) y mínimo (azul) del día anterior. Objetivos de liquidez.
 - **Info box** (sobre la última vela) — `Δ` delta, `V` volumen y `↓% ↑%` el reparto
   vendedor/comprador. Solo en la última vela, para no saturar.
@@ -441,6 +470,9 @@ tal como aparece en esa lista**.
 | Menos líneas de zonas redondas en pantalla | *Niveles a cada lado* | 20 por defecto |
 | Murrey sobre más o menos historia | *Murrey Math: velas D1 del octavo* | 64 por defecto |
 | VolPiv más pegado o más suelto | *Volatility pivot: factor ATR* | 3.0 por defecto. Menos = más pegado y más cruces |
+| Cambiar la hora de apertura o cierre de una plaza | *Sesion: apertura/cierre Asia · Londres · Nueva York* | Formato **HHMM** en la hora **local de esa plaza**: `930` = 09:30, `1600` = 16:00. Nueva York viene con el contado (`930`–`1600`); si operas futuros pon `800`–`1700` |
+| Que el desfase del broker no se mida solo | *Offset GMT del broker en horas* | `99` = automático (se mide en las velas). Pon el número (`3`, `-5`…) si tu PC tiene mal la zona horaria y prefieres fijarlo |
+| Cambiar el símbolo con el que se mide ese desfase | *Simbolo FX de referencia para medir el offset del broker* | `EURUSD`. Ponle el sufijo de tu broker si allí se llama distinto |
 
 ---
 
@@ -463,6 +495,10 @@ tal como aparece en esa lista**.
 | **VolPiv** dibuja una sola línea | No es un nivel fijo, es un stop que camina con el precio | Correcto por diseño |
 | Demasiadas zonas redondas | Paso pequeño para ese activo | Sube el paso en la fila **Paso** (100 → 200 → 500) o baja *Niveles a cada lado* |
 | Un nivel o una zona no cae donde marca la escala | Bug de rejilla anterior a la **v4.32**: el desvío crecía hacia abajo del gráfico | Actualiza el `.ex5`. Comprueba con una línea horizontal tuya: debe coincidir clavada |
+| La tira de sesión marca Nueva York abierta antes de hora | Anterior a la **v4.33**: las horas eran enteras y el defecto era `8` (08:00 ET, apertura de futuros), no las 09:30 del contado | Actualiza el `.ex5`. Los inputs de sesión ahora son **HHMM** |
+| La tira de sesión sale desplazada unas horas | La leyenda de la izquierda dice `Ses GMT+N~`: está usando el reloj del PC porque no hay histórico H1 del símbolo de referencia | Abre el gráfico de *EURUSD* en H1 una vez para que MT5 lo descargue, o fija *Offset GMT del broker en horas* a mano |
+| Falta el máximo/mínimo de una plaza con **Session** encendido | El histórico de M5 no cubre su última sesión completa | Deja el terminal descargar M5, o baja de temporalidad un momento para forzarlo |
+| No aparece nada al encender **Session** de Niveles | Puede que estés mirando la sesión en curso: solo se pintan las **cerradas** | Espera a que cierre, o comprueba en la tira de abajo qué plaza está abierta |
 | Cambio algo y no se ve | Estás mirando otro terminal MT5 | El `.ex5` recompilado va a la carpeta de datos de *su* instalación; cópialo a la del terminal que tienes abierto |
 
 ---
