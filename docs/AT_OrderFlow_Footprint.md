@@ -1,6 +1,6 @@
 # Manual de usuario — AT OrderFlow Footprint
 
-Versión: 4.33+.
+Versión: 4.34+.
 
 Guía de **uso**: qué ves en pantalla, qué hace cada botón y para qué sirve.
 No hay código aquí.
@@ -163,23 +163,31 @@ VP, Table y Header**; el resto lo enciendes tú.
 | **Sweep** | Barrido: el precio pasa el swing pero **cierra de vuelta** | Cazar trampas de liquidez |
 | **FVG** | Fair Value Gaps sin rellenar | Buscar zonas de retorno |
 | **SNR** | Bandas de soporte/resistencia por toques repetidos | Niveles "duros" |
-| **MAs** | Medias 9/21/50 + VWAP de sesión | Contexto de tendencia |
+| **MAs** | Medias 9/21/50 + VWAP anclado a la apertura del día | Contexto de tendencia |
 | **Round** | Zonas de números redondos, con banda. Al encenderlo aparece debajo la fila **Paso** | Siempre. Es donde se acumulan órdenes y stops |
 | **Std** | Pivotes diarios clásicos: PP, R1-R3, S1-S3 | Referencia intradía de toda la vida |
-| **Fibo** | Pivotes por Fibonacci: PP, R1-R4, S1-S4 | Si trabajas con retrocesos |
-| **Cam** | Pivotes Camarilla: PP, R1-R4, S1-S4 | Días de rango: R4/S4 son los de reversión |
+| **Fibo** | Pivotes por Fibonacci: PP, R1-R3, S1-S3, con el **ratio en la etiqueta** (`38.2%`, `61.8%`, `100%`) | Si trabajas con retrocesos |
+| **Cam** | Pivotes Camarilla: PP, R1-R4, S1-S4 | Días de rango: R3/R4 son los de reversión |
 | **Woody** | Pivotes Woodie: PP, R1-R4, S1-S4 | Variante con más peso en el cierre |
 | **DeMark** | Pivotes DeMark: **solo PP, R1 y S1** | Cuando quieres una única referencia limpia |
-| **Murrey** | Murrey Math: las 13 líneas de 0/8 a 8/8 (más ±1/8, ±2/8) | Marco de precio "cuadriculado" |
+| **Murrey** | Murrey Math: cuadrícula de octavos, de 0/8 a 8/8 (más ±1/8, ±2/8) | Marco de precio "cuadriculado" |
 | **VolPiv** | Volatility pivot: **una** línea que camina con el precio | Como stop dinámico / filtro de tendencia |
 | **Session** | Máximo y mínimo de la última sesión cerrada de Asia, Londres y Nueva York | Para operar contra el rango de la sesión anterior |
+| **PDH/PDL** | Máximo y mínimo del día anterior | Casi siempre: son objetivos de liquidez |
 
-**Las nueve son independientes: enciende las que uses y apaga el resto.** Con cuatro
-familias a la vez el gráfico se llena de líneas y las etiquetas de la izquierda se
-pisan. Cada etiqueta lleva prefijo para saber de quién es: `F`=Fibo, `C`=Camarilla,
-`W`=Woodie, `D`=DeMark, `M`=Murrey, `R`=Round. **Session** es la excepción: sus
-etiquetas van pegadas al **borde derecho** y se nombran solas (`ASIA H`, `LON L`,
-`NY H`…), así que no se pisan con las demás.
+**Todas son independientes: enciende las que uses y apaga el resto.** Cada etiqueta
+lleva prefijo para saber de quién es: `F`=Fibo, `C`=Camarilla, `W`=Woodie, `D`=DeMark,
+`M`=Murrey, `RND`=Round. **Session** es la excepción: sus etiquetas van pegadas al
+**borde derecho** y se nombran solas (`ASIA H`, `LON L`, `NY H`…), así que nunca se
+pisan con las demás.
+
+**Cada familia pinta como mucho cinco líneas**: su eje (el `PP` de los pivotes, el
+`4/8` de Murrey) más los **dos niveles más cercanos por encima del precio y los dos
+por debajo**. Los demás existen, pero no se dibujan: con cuatro familias encendidas a
+la vez eran treinta cajas apiladas en la misma columna y no se leía ninguna. Las
+etiquetas van en el **margen izquierdo del gráfico**, fuera de las celdas del
+footprint. **PDH/PDL** es la excepción: si lo enciendes salen los dos siempre, estén
+donde estén, porque para eso lo has encendido.
 
 Detalle de qué mira cada una:
 
@@ -187,12 +195,15 @@ Detalle de qué mira cada una:
   activo (no es lo mismo un redondo en EURUSD que en BTCUSD), así que funciona en
   cualquier símbolo sin tocar nada. 20 zonas arriba y 20 abajo. **El paso lo eliges tú
   con la fila `Paso`** (ver abajo).
-- **Std / Fibo / Cam / Woody / DeMark** — el **día de ayer**. Se calculan una vez y no
-  se mueven en toda la sesión. DeMark es el único que además mira la **apertura** de
-  ayer (por eso da solo tres líneas: es su diseño, no un fallo).
-- **Murrey** — los **últimos 64 días**. Divide ese rango en octavos: el **4/8** es el
-  eje (gris), 0/8 y 8/8 son los extremos, y 3/8-5/8 la zona de rango donde el precio
-  pasa la mayor parte del tiempo.
+- **Std / Fibo / Cam / Woody / DeMark** — el **día de ayer**: la vela diaria ya
+  cerrada. Se calculan una vez y no se mueven en toda la sesión, que es justamente
+  para lo que sirven. DeMark es el único que además mira la **apertura** de ayer (por
+  eso da solo tres líneas: es su diseño, no un fallo).
+- **PDH/PDL** — también el día de ayer, pero sin fórmula: su máximo (naranja) y su
+  mínimo (azul) tal cual.
+- **Murrey** — los **últimos 64 días cerrados**. Divide ese rango en octavos: el
+  **4/8** es el eje y se pinta siempre, 0/8 y 8/8 son los extremos, y 3/8-5/8 la zona
+  de rango donde el precio pasa la mayor parte del tiempo.
 - **VolPiv** — las velas de la **temporalidad que tengas puesta**. No es un nivel
   fijo: es un stop por volatilidad que persigue al precio y solo se aprieta. **Verde**
   = el precio está por encima (sesgo alcista) · **rojo** = por debajo.
@@ -356,8 +367,8 @@ presión agresiva acumulada de las últimas ~8 velas, normalizadas al lado más 
 ### 5.6 Zonas, niveles y marcas del gráfico
 
 - **Zonas Oferta/Demanda** (botón **Zones**) — bandas en los swings que se hicieron con volumen
-  destacado: **rojo (Supply)** en máximos, **verde (Demand)** en mínimos. Etiqueta en ambos
-  extremos: `S/D <volumen> <fuerza>x`. La **fuerza `Nx`** es cuántas veces supera el volumen
+  destacado: **rojo (Supply)** en máximos, **verde (Demand)** en mínimos. Etiqueta al final
+  de la banda, donde está el precio: `S/D <volumen> <fuerza>x`. La **fuerza `Nx`** es cuántas veces supera el volumen
   medio: **cuanto más alto, más importante la zona**.
 - **Bandas SNR** — zonas donde el precio ha rebotado varias veces. Rojo por encima
   (resistencia), verde por debajo (soporte). La etiqueta `SNR x3` son los toques: más toques,
@@ -371,12 +382,16 @@ presión agresiva acumulada de las últimas ~8 velas, normalizadas al lado más 
     desaparece cuando el precio lo rellena.
   - **`÷div`** = divergencia de RSI: rojo si el precio hace máximo más alto y el RSI no;
     verde si el precio hace mínimo más bajo y el RSI no.
-- **Pivotes diarios** (botón **Std**) — `PP` (gris), `R1/R2/R3` (rojo), `S1/S2/S3` (verde),
-  calculados sobre el día anterior.
-- **Otras familias de niveles** (**Round / Fibo / Cam / Woody / DeMark / Murrey / VolPiv**) —
-  todas se dibujan igual: **línea discontinua** de izquierda a derecha, con la etiqueta a la
-  izquierda (`prefijo + nivel + precio`). **Rojo = por encima, actúa como resistencia · verde
-  = por debajo, actúa como soporte · gris = el pivote central o el eje 4/8.**
+- **Pivotes diarios** (botón **Std**) — `PP` más los `R`/`S` cercanos, calculados sobre el
+  día anterior.
+- **Todas las familias de niveles** (**Std / Round / Fibo / Cam / Woody / DeMark / Murrey /
+  VolPiv / PDH-PDL**) se dibujan igual: **línea discontinua** hasta el borde derecho, con la
+  etiqueta en el **margen izquierdo** (`prefijo + nivel + precio`).
+  **El color lo decide dónde está el precio, no cómo se llama el nivel:** rojo si el nivel
+  está **por encima** (te hace de resistencia), verde si está **por debajo** (te hace de
+  soporte). Una `R1` que el precio ya ha superado sale verde, porque a partir de ahí es
+  soporte. El **eje** de cada sistema —el `PP`, el `4/8` de Murrey— va aparte, en el color
+  de cabecera, y se pinta siempre.
   Las de **Round** llevan además una banda tenue: el redondo no es un precio exacto, es una
   zona.
 - **Todo cae en su precio real.** Desde la **v4.32** la rejilla del footprint coincide
@@ -400,7 +415,9 @@ presión agresiva acumulada de las últimas ~8 velas, normalizadas al lado más 
     esas horas cuentan para las dos plazas que las comparten, y nada más.
   - Si una plaza no sale, es que el histórico de M5 no llega a cubrir su última sesión
     completa. Se prefiere no dibujar nada antes que dibujar un rango truncado.
-- **PDH / PDL** — máximo (naranja) y mínimo (azul) del día anterior. Objetivos de liquidez.
+- **PDH / PDL** (botón **PDH/PDL** de la fila **Niveles**) — máximo (naranja) y mínimo
+  (azul) del día anterior. Objetivos de liquidez. Salen los dos siempre que el botón esté
+  encendido.
 - **Info box** (sobre la última vela) — `Δ` delta, `V` volumen y `↓% ↑%` el reparto
   vendedor/comprador. Solo en la última vela, para no saturar.
 - **Columna de lecturas** (junto al dial) — posición contra MA 9/21/50 y VWAP (UP ABOVE / DN
@@ -434,8 +451,114 @@ presión agresiva acumulada de las últimas ~8 velas, normalizadas al lado más 
 - **News** — próximos eventos del calendario económico de MT5, hasta 5, con cuenta atrás
   D:HH:MM y color por impacto (rojo alto, naranja medio, gris bajo). Filtrable por impacto
   mínimo y por las divisas de tu símbolo. Se refresca cada minuto.
-- **Trade** — la ejecución real: BUY/SELL, pendientes, CLOSE, break-even, Risk ±, con líneas
-  arrastrables y cajas editables.
+- **Trade** — la ejecución real: largo o corto, a mercado o pendiente, con líneas
+  arrastrables y cajas editables. Tiene sección propia: ver **5.8**.
+
+### 5.8 El panel TRADE, en detalle
+
+Es el único panel que **manda órdenes**. Se enciende con el botón `Trade` de la fila
+**Paneles** y arranca apagado a propósito.
+
+Trabaja con tres líneas arrastrables en el gráfico —**Entry**, **SL**, **TP**— y las
+mismas cifras en cajas editables. Da igual por dónde lo hagas: arrastrar la línea,
+teclear el precio en la caja o pulsar un botón acaban en el mismo sitio.
+
+**Las tres líneas se arrastran con el ratón** y el panel recalcula solo el R:R, el
+lote y el dinero en juego.
+
+#### La fila de dirección y tipo
+
+```
+LONG   SHORT   INSTANT   PENDING
+```
+
+- **LONG / SHORT** — el lado. El activo va en verde o en rojo; el otro, apagado.
+  Cambiar de lado refleja el SL y el TP al otro lado de la entrada. Pulsar el que ya
+  está puesto no hace nada.
+- **INSTANT** — se entra **a mercado**. La línea de entrada sigue al precio sola: en
+  este modo la entrada *es* el mercado, y la línea lo refleja.
+- **PENDING** — se entra **donde tú pongas la línea**. Arrastrar la entrada activa
+  este modo solo: si has elegido un precio, es que no quieres entrar a mercado.
+
+#### Qué orden se va a enviar
+
+En **PENDING**, el tipo de orden **no lo eliges**: sale de dónde esté la línea
+respecto al precio.
+
+| | Línea **por encima** del precio | Línea **por debajo** del precio |
+|---|---|---|
+| **LONG** | `BUY STOP` | `BUY LIMIT` |
+| **SHORT** | `SELL LIMIT` | `SELL STOP` |
+
+El nombre aparece en tres sitios a la vez y cambia mientras arrastras: en el rótulo de
+la fila `Entry`, en la etiqueta de la línea del gráfico y en el propio botón
+(`EXECUTE  SELL LIMIT 1.80`). Así ves lo que vas a mandar antes de mandarlo.
+
+#### SL, TP y R:R
+
+Cada uno en su fila, con su precio editable y su botón **`Fijar`**:
+
+- **SL** — a su izquierda, **lo que pierdes** si salta, en dinero de la cuenta.
+- **TP** — a su izquierda, **lo que ganas** si llega. Si sale **negativo y en rojo**,
+  el TP está del lado equivocado y no se enviará.
+- **R:R** — la proporción. Puedes teclearla (`2` o `1:2`) y el TP se recoloca.
+
+Los mismos importes salen sobre las líneas del gráfico: `SL -99.57`, `TP +183.21`.
+Están calculados con **el lote que se va a enviar de verdad**, no con el riesgo que
+hayas pedido: si el bróker capa el lote por su mínimo o su máximo, lo que lees es lo
+que realmente te juegas.
+
+**Qué hace `Fijar`:**
+
+- En **SL** o **TP** — ese nivel se queda en su **precio absoluto**. Sin fijar, el
+  nivel conserva su **distancia** a la entrada, así que acompaña al mercado en modo
+  INSTANT. Fíjalo cuando lo hayas puesto en un sitio concreto (un mínimo, un nivel) y
+  quieras que se quede ahí.
+- En **R:R** — congela la proporción: a partir de ahí el TP **se deriva** del riesgo.
+  Mueves el SL y el TP se recoloca solo para mantener el mismo R:R.
+- **`Fijar` del TP y `Fijar` del R:R son excluyentes.** No pueden mandar los dos sobre
+  el mismo precio: encender uno apaga el otro. Y arrastrar el TP a mano suelta el R:R
+  fijado, porque el gesto dice lo que quieres.
+
+#### Riesgo y lote
+
+```
+Riesgo    %  Money   [ 1.00 ]
+Lote      Auto Manual [ 1.80 ]
+```
+
+Son dos preguntas distintas:
+
+- **`Auto` / `Manual`** — quién decide el **lote**: el riesgo, o tú.
+- **`%` / `Money`** — la **unidad** del riesgo: porcentaje del balance, o dinero.
+
+Con **`Auto`**, tú pones el riesgo y el lote sale de él y de la distancia al SL: mueve
+el SL y el lote cambia.
+
+Con **`Manual`**, tú pones el lote y **el riesgo se calcula solo** a partir de ese lote
+y del SL. La caja del riesgo se pone en gris (ya no manda) y el rótulo pasa a
+`Riesgo* %` o `Riesgo* USD` — el asterisco significa "derivado", igual que en `Lote*`.
+`%` y `Money` se apagan los dos, porque en manual el riesgo ya no manda sobre el lote.
+
+**Pulsar `%` o `Money` con el lote en manual te devuelve a `Auto`**, y lo hace sin que
+el lote dé un salto: adopta como riesgo el que ese lote manual estaba tomando de
+verdad.
+
+`Lote MAX` o `Lote MIN` en naranja significa que el bróker ha topado el lote y el
+riesgo que pediste **no es alcanzable** con ese SL.
+
+#### El resto de botones
+
+- **`EXECUTE`** — manda la orden. Pide confirmación si `TradeConfirm` está activo.
+- **`CLOSE`** — cierra posiciones y cancela pendientes **dentro de su alcance**.
+- **`B/E`** — mueve el stop a break-even, con el desplazamiento por comisiones.
+- **`B/E AUTO`** con su importe — hace lo mismo solo, cuando el beneficio flotante
+  llega a esa cifra.
+
+**El alcance lo decide `TradeMagic`** (en propiedades): distinto de cero, el panel solo
+toca lo que ha abierto él; a cero, **todas** las operaciones del símbolo. La cabecera lo
+dice: `Pos 2 (mías)` o `Pos 2 (TODAS)`.
+
 
 ---
 
@@ -494,6 +617,9 @@ tal como aparece en esa lista**.
 | Las etiquetas de niveles se pisan | Varias familias encendidas con niveles a precios parecidos | Apaga las que no uses; el prefijo (`F`/`C`/`W`/`D`/`M`/`R`) dice de quién es cada una |
 | **VolPiv** dibuja una sola línea | No es un nivel fijo, es un stop que camina con el precio | Correcto por diseño |
 | Demasiadas zonas redondas | Paso pequeño para ese activo | Sube el paso en la fila **Paso** (100 → 200 → 500) o baja *Niveles a cada lado* |
+| Apago todos los chips y siguen saliendo dos líneas | Son **PDH/PDL**. Antes de la **v4.34** no tenían botón: dependían del `input showPDHL` | Actualiza el `.ex5`: ahora se apagan con su chip `PDH/PDL` |
+| El SL vuelve solo a su sitio al arrastrarlo | Anterior a la **v4.34**: en modo INSTANT el panel reescribía el SL en cada tick mientras lo movías | Actualiza el `.ex5` |
+| Con el lote en `Manual`, el riesgo se queda en `1.00` | Anterior a la **v4.34**: mostraba el riesgo *pedido*, que en manual ya no se aplica | Actualiza el `.ex5`: ahora se deriva del lote y del SL |
 | Un nivel o una zona no cae donde marca la escala | Bug de rejilla anterior a la **v4.32**: el desvío crecía hacia abajo del gráfico | Actualiza el `.ex5`. Comprueba con una línea horizontal tuya: debe coincidir clavada |
 | La tira de sesión marca Nueva York abierta antes de hora | Anterior a la **v4.33**: las horas eran enteras y el defecto era `8` (08:00 ET, apertura de futuros), no las 09:30 del contado | Actualiza el `.ex5`. Los inputs de sesión ahora son **HHMM** |
 | La tira de sesión sale desplazada unas horas | La leyenda de la izquierda dice `Ses GMT+N~`: está usando el reloj del PC porque no hay histórico H1 del símbolo de referencia | Abre el gráfico de *EURUSD* en H1 una vez para que MT5 lo descargue, o fija *Offset GMT del broker en horas* a mano |
