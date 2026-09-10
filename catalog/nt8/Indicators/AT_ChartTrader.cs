@@ -158,7 +158,8 @@ namespace NinjaTrader.NinjaScript.Indicators
         private Chart chartWindow;
         private Grid  chartTraderGrid;
         private ChartTrader chartTraderControl;
-        private Border     frame;
+        private Border       frame;
+        private ScrollViewer scroller;
         private Brush      textBrush = Brushes.Gainsboro;
         private StackPanel panel;
 
@@ -323,6 +324,12 @@ namespace NinjaTrader.NinjaScript.Indicators
                  Description = "Ancho fijo del panel. Fijo a propósito: si dependiera del contenido, el panel se ensancharía y estrecharía cada vez que un precio cambia de número de dígitos.")]
         public int PanelWidth { get; set; }
 
+        [NinjaScriptProperty]
+        [Range(0, 4000)]
+        [Display(Name = "Alto máximo del panel (px)", Order = 6, GroupName = "Operativa",
+                 Description = "0 = se ajusta solo al alto del Chart Trader. Si el panel no cabe, su cuerpo se desplaza con la rueda; el interruptor de operativa nunca se desplaza.")]
+        public int PanelMaxHeight { get; set; }
+
         #endregion
 
         protected override void OnStateChange()
@@ -351,6 +358,7 @@ namespace NinjaTrader.NinjaScript.Indicators
                 StartUseStop         = true;
                 StartUseTarget       = true;
                 PanelWidth           = 300;
+                PanelMaxHeight       = 0;
             }
             else if (State == State.DataLoaded)
             {
@@ -683,8 +691,6 @@ namespace NinjaTrader.NinjaScript.Indicators
                 // columnas y el panel entero tiembla varias veces por segundo.
                 // Fijandolo, lo que sobra se reparte dentro y nada se mueve.
                 Width = PanelWidth,
-                // Sin esto el marco se estira al alto de la fila y reparte los
-                // controles por toda la altura disponible.
                 VerticalAlignment = VerticalAlignment.Top
             };
             // Las columnas de etiqueta de todas las filas comparten ancho: se
@@ -703,12 +709,48 @@ namespace NinjaTrader.NinjaScript.Indicators
             textBrush = ThemeTextBrush();
             TextElement.SetForeground(frame, textBrush);
 
-            StackPanel outer = new StackPanel();
-            outer.Children.Add(BuildHeader());
+            // Cabecera e interruptor FIJOS, cuerpo desplazable. En un monitor
+            // bajo, el panel se sale por abajo y lo primero que desaparece es lo
+            // ultimo que se anadio — que era justo OPERATIVA, el interruptor que
+            // no puede faltar nunca. Sacandolo del area que se desplaza y
+            // poniendolo arriba, deja de depender de que quepa el resto.
+            Grid outer = new Grid();
+            outer.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });   // cabecera
+            outer.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
+            outer.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });   // interruptor
+
+            UIElement header = BuildHeader();
+            outer.Children.Add(header);
+
+            // El interruptor va abajo, donde se espera, pero FUERA del area que
+            // se desplaza. Ahi es donde estaba y desaparecia; ahora no puede,
+            // porque el marco esta acotado al hueco visible y su fondo siempre
+            // cabe. Lo que se desplaza es el cuerpo, no el.
+            UIElement arm = BuildArmRow();
+            Grid.SetRow(arm, 2);
+            outer.Children.Add(arm);
 
             panel = new StackPanel { Margin = new Thickness(5, 4, 5, 5) };
-            outer.Children.Add(panel);
+            scroller = new ScrollViewer
+            {
+                Content = panel,
+                VerticalScrollBarVisibility   = ScrollBarVisibility.Auto,
+                HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled
+            };
+            // La rueda se atiende aqui y se consume. Sobre una ventana de
+            // grafico, NinjaTrader la usa para hacer zoom: sin consumirla, girar
+            // la rueda encima del panel movia el grafico en vez del panel.
+            scroller.PreviewMouseWheel += (s2, e2) =>
+            {
+                scroller.ScrollToVerticalOffset(scroller.VerticalOffset - e2.Delta);
+                e2.Handled = true;
+            };
+            Grid.SetRow(scroller, 1);
+            outer.Children.Add(scroller);
+
             frame.Child = outer;
+
+            UpdatePanelMaxHeight();
 
             panel.Children.Add(BuildAccountRow());
             panel.Children.Add(BuildInfoGrid());
@@ -736,7 +778,6 @@ namespace NinjaTrader.NinjaScript.Indicators
             panel.Children.Add(BuildExecuteRow());
             panel.Children.Add(BuildManageRow());
             panel.Children.Add(BuildStatusRow());
-            panel.Children.Add(BuildArmRow());
 
             chartTraderGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
             Grid.SetRow(frame, chartTraderGrid.RowDefinitions.Count - 1);
@@ -817,6 +858,33 @@ namespace NinjaTrader.NinjaScript.Indicators
             }
 
             return grid ?? ct.Content as Grid;
+        }
+
+        // Alto disponible = lo que queda de ventana por debajo de donde empieza
+        // el panel. Se mide, no se ata a una propiedad.
+        //
+        // Atarlo a ChartTrader.ActualHeight era CIRCULAR: el panel vive dentro
+        // del Chart Trader y lo hace mas alto, asi que el tope crecia con el
+        // contenido y no limitaba nunca — ni barra, ni desplazamiento, y lo que
+        // sobraba se cortaba igual. La posicion de arranque del panel si es
+        // independiente de su propia altura, porque va en la ultima fila.
+        private void UpdatePanelMaxHeight()
+        {
+            if (frame == null) return;
+
+            if (PanelMaxHeight > 0) { frame.MaxHeight = PanelMaxHeight; return; }
+            if (chartWindow == null || chartWindow.ActualHeight <= 0) return;
+
+            try
+            {
+                Point origin = frame.TranslatePoint(new Point(0, 0), chartWindow);
+                double libre = chartWindow.ActualHeight - origin.Y - 12;
+                // Por debajo de esto no cabe ni la cabecera con el interruptor;
+                // mejor dejarlo crecer y que se corte que dar un panel inutil.
+                if (libre >= 160 && Math.Abs(frame.MaxHeight - libre) > 2)
+                    frame.MaxHeight = libre;
+            }
+            catch { }
         }
 
         private void RemovePanel()
@@ -1624,6 +1692,7 @@ namespace NinjaTrader.NinjaScript.Indicators
                 if (nowMs - lastScanMs >= 1000)
                 {
                     lastScanMs = nowMs;
+                    UpdatePanelMaxHeight();
                     ordersText.Text = DescribeWorkingOrders();
                     Position live = CurrentPosition();
                     ReconcileProtection(live);
