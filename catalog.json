@@ -4,9 +4,9 @@
       "platform": "mt5",
       "kind": "Experts",
       "file": "AT_OrderFlow_Footprint.ex5",
-      "version": "4.33",
-      "sha256": "501d7f3d9c34134eaed3e2cc75e963cb4201a4ebb2560cf0b21d7cbf24b5d2bf",
-      "notes": "Nuevo indicador de maximos y minimos de sesiones.",
+      "version": "4.34",
+      "sha256": "7b249f0eccd2938ed3c9387499e9dc4f519cb2648cfc9ae89d668d6bc5d92566",
+      "notes": "Chip PDH/PDL y niveles mas legibles: solo los cercanos al precio, color segun donde este el precio y etiquetas fuera de las celdas. VWAP anclado a la apertura del dia. Panel TRADE: el SL ya se puede arrastrar, LONG y SHORT separados, se indica el tipo de orden pendiente y el dinero que se juega en cada SL y TP.",
       "min_app": "1.6",
       "manual": "AT_OrderFlow_Footprint.md"
     },
