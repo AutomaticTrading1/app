@@ -4,8 +4,8 @@
       "platform": "mt5",
       "kind": "Experts",
       "file": "AT_eur50_reversal.ex5",
-      "version": "1.01",
-      "sha256": "b5cd817ae0f890bc29f33ee4bb903a0c50e3bc8bba4a13c953764d04b5cf9b90",
+      "version": "1.02",
+      "sha256": "bf0315b122ddfbce5464dc796ed7ced28c44ce053e5126aedab38e2386462d92",
       "notes": "Actualizacion de parametros."
     },
     {
