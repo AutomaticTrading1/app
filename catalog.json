@@ -31,9 +31,9 @@
       "platform": "mt5",
       "kind": "Experts",
       "file": "AT_Wyckoff_induction.ex5",
-      "version": "3.10",
-      "sha256": "56e34321f4c39ef3272c18416ae306784a57cb11fa2c2f9c468879e5aa56c842",
-      "notes": "Modelo de induccion y liquidez. Ahora gestionado de fabrica: la aplicacion controla sus entradas con las reglas de riesgo de la cartera. El backtest no se ve afectado.",
+      "version": "3.11",
+      "sha256": "7314f87dc8beeb1a9d3b3488f7ba91145b3c0b5cb16b406dd20440e2fc1d3447",
+      "notes": "Alineacion del numero de version: el catalogo y el panel de propiedades del EA mostraban numeros distintos. Sin cambios de funcionamiento.",
       "min_app": "1.6"
     },
     {
