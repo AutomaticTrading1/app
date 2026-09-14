@@ -4,9 +4,9 @@
       "platform": "mt5",
       "kind": "Experts",
       "file": "AT_eur50_reversal.ex5",
-      "version": "1.00",
-      "sha256": "beb1cb90facb64dcf108500889dd875e891e11cf437ed7c82c51f8923a0ff511",
-      "notes": "Vela de rechazo en extremo de rango. Marca el maximo y el minimo de las ultimas N barras cerradas y entra con la vela que toca un extremo y cierra rechazandolo: compra en el minimo, vende en el maximo. SL al otro lado de la mecha (1.05 x ATR) y TP por relacion R:R. Un simbolo, una posicion a la vez, riesgo por operacion en % y break-even. Gestionado de fabrica: la aplicacion controla sus aperturas. Requiere licencia activa."
+      "version": "1.01",
+      "sha256": "b5cd817ae0f890bc29f33ee4bb903a0c50e3bc8bba4a13c953764d04b5cf9b90",
+      "notes": "Actualizacion de parametros."
     },
     {
       "platform": "mt5",
