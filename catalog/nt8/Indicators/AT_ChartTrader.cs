@@ -244,26 +244,34 @@ namespace NinjaTrader.NinjaScript.Indicators
         private readonly object pendingLock = new object();
         private readonly Dictionary<Order, Bracket> pending = new Dictionary<Order, Bracket>();
 
-        // Stop vivo sobre el que actua el break-even. Lo escribe el hilo de
-        // eventos al mandar la proteccion y lo lee OnBarUpdate.
-        // Ordenes de proteccion vivas (el par SL/TP) y si hemos llegado a ver la
-        // posicion abierta con ellas puestas. Sin ese segundo dato no se puede
-        // distinguir "aun no ha aparecido la posicion" de "la posicion ya se
-        // cerro", y cancelariamos la proteccion recien enviada.
-        // Las protecciones se llevan por PARES OCO, no como ordenes sueltas. Hace
-        // falta porque ahora la cobertura puede ser PARCIAL: se puede tener 6
+        // Ordenes de proteccion vivas, por PARES OCO y no como ordenes sueltas.
+        // Hace falta porque la cobertura puede ser PARCIAL: se puede tener 6
         // contratos sin proteger y anadir 3 con SL y TP. Al recortar hay que
         // tocar las dos patas del mismo par a la vez, o se queda una pata
         // huerfana sin su OCO.
+        //
+        // IsLong es el lado que protege este par (largo -> las patas VENDEN), no
+        // el lado de las patas. Sin el, una proteccion de largo y otra de corto
+        // se sumarian en el mismo saco al compararlas con la posicion.
+        //
+        // SentMs marca cuando se envio. La cuenta puede publicar la posicion
+        // nueva DESPUES de que el fill haya disparado la proteccion, asi que
+        // durante un margen el par no se toca: si no, se cancelaria a si mismo.
         private sealed class ProtPair
         {
             public Order Stop;      // puede ser null si solo se puso TP
             public Order Target;    // puede ser null si solo se puso SL
             public int   Quantity;
+            public bool  IsLong;
+            public long  SentMs;
         }
 
         private readonly List<ProtPair> protectionPairs = new List<ProtPair>();
-        private bool sawPosition;
+
+        // Margen antes de que un par recien enviado cuente para el reajuste.
+        // ponytail: un numero, no una maquina de estados. Si el broker tarda mas
+        // que esto en publicar la posicion, subirlo.
+        private const long ProtectionGraceMs = 1500;
 
         private sealed class Bracket
         {
@@ -1643,10 +1651,7 @@ namespace NinjaTrader.NinjaScript.Indicators
                 account.PositionUpdate -= OnAccountPositionUpdate;
             }
             lock (pendingLock)
-            {
                 protectionPairs.Clear();
-                sawPosition = false;
-            }
 
             int orphans;
             lock (pendingLock)
@@ -1694,9 +1699,7 @@ namespace NinjaTrader.NinjaScript.Indicators
                     lastScanMs = nowMs;
                     UpdatePanelMaxHeight();
                     ordersText.Text = DescribeWorkingOrders();
-                    Position live = CurrentPosition();
-                    ReconcileProtection(live);
-                    CancelOrphanProtection(live);
+                    ReconcileProtection(CurrentPosition());
                 }
 
                 Position p = positionCache;
@@ -1739,14 +1742,6 @@ namespace NinjaTrader.NinjaScript.Indicators
             }
         }
 
-        // Si la posicion se cierra POR FUERA (boton Cerrar del panel nativo, o
-        // desde la pestana Posiciones), nadie cancela el SL y el TP: el OCO solo
-        // empareja entre ellos dos. Y un stop-market de salida sin posicion no es
-        // proteccion, es una ENTRADA al reves esperando a que la toquen.
-        //
-        // Solo se cancela despues de haber VISTO la posicion abierta con esta
-        // proteccion puesta. Si no, se cancelaria el par recien enviado en el
-        // instante entre el fill y que la posicion aparezca.
         // La posicion cambia por EVENTO, no cada segundo. Sin esto, entre cerrar
         // parte de la posicion y que el barrido lo notara habia hasta UN SEGUNDO
         // con la proteccion cubriendo mas contratos de los que quedan: si el stop
@@ -1759,7 +1754,6 @@ namespace NinjaTrader.NinjaScript.Indicators
 
             Position p = e.MarketPosition == MarketPosition.Flat ? null : e.Position;
             ReconcileProtection(p);
-            CancelOrphanProtection(p);
         }
 
         private static int PairQty(ProtPair p)
@@ -1777,115 +1771,113 @@ namespace NinjaTrader.NinjaScript.Indicators
                 || o.OrderState == OrderState.TriggerPending;
         }
 
-        // LA CANTIDAD DE LA PROTECCION SIGUE A LA DE LA POSICION. Es la misma
-        // regla que el AddOn AutomaticTradingNT8 aprendio a base de golpes: al
-        // ampliar protegia de menos, y al recortar protegia de MAS - y un
-        // bracket mayor que la posicion no cierra nada cuando salta, ABRE una
-        // posicion en sentido contrario.
+        // LA PROTECCION NUNCA PUEDE CUBRIR MAS QUE LA POSICION, NI ESTAR DEL LADO
+        // QUE NO ES. Es la regla que el AddOn AutomaticTradingNT8 aprendio a base
+        // de golpes: un bracket mayor que la posicion no cierra nada cuando
+        // salta, ABRE una posicion en sentido contrario. Y sin posicion detras,
+        // un stop-market de salida no es proteccion: es una entrada al reves
+        // esperando a que la toquen.
+        //
+        // Se compara POR LADO y contra la posicion NETA, no contra el fill que
+        // genero el par. NinjaTrader netea: con un largo abierto, vender 1 con SL
+        // y TP no abre un corto - compensa el largo, la cuenta queda PLANA, y el
+        // par ya habia salido. Esos dos huerfanos son el caso peligroso, y da
+        // igual la direccion y da igual que la primera pata llevara proteccion.
+        // Sumar todos los pares en un solo saco tampoco vale: una proteccion de
+        // largo y otra de corto se taparian entre ellas.
         //
         // Se ajusta la orden viva con QuantityChanged en vez de cancelar y
         // rehacer: cancelar deja un hueco de milisegundos sin proteccion, y en
         // un camino de dinero ese hueco no compensa.
         //
-        // De aqui salen gratis los tres casos: piramidar, cerrar parcial y el
-        // llenado parcial. Los tres son el mismo problema.
-        // LA PROTECCION NUNCA PUEDE CUBRIR MAS QUE LA POSICION. Menos si, y a
-        // proposito: se pueden llevar contratos sin proteger. Pero de mas no -
-        // un stop que cubre mas contratos de los que hay no cierra cuando salta,
-        // ABRE en contra por la diferencia. Es lo que el AddOn documento:
-        // "un bracket mayor que la posicion abre posicion en sentido contrario".
+        // De aqui salen gratis todos los casos: piramidar, cerrar parcial, el
+        // llenado parcial, cerrar por fuera y el neteo. Son el mismo problema.
         //
         // Solo RECORTA. Ampliar seria decidir por el usuario que quiere proteger
         // lo que dejo aposta sin proteger.
         private void ReconcileProtection(Position position)
         {
-            if (position == null) return;
-            int target = position.Quantity;
-            if (target <= 0) return;
+            if (account == null) return;
+
+            int netLong = 0, netShort = 0;
+            if (position != null && position.Quantity > 0)
+            {
+                if (position.MarketPosition == MarketPosition.Long)       netLong  = position.Quantity;
+                else if (position.MarketPosition == MarketPosition.Short) netShort = position.Quantity;
+            }
 
             List<Order> change = new List<Order>();
             List<Order> cancel = new List<Order>();
+            long now = clock.ElapsedMilliseconds;
 
             lock (pendingLock)
             {
-                int covered = 0;
-                foreach (ProtPair pair in protectionPairs) covered += PairQty(pair);
-                if (covered <= target) return;
-
-                // Se recorta por el final, que es el tramo mas reciente.
-                int excess = covered - target;
-                for (int i = protectionPairs.Count - 1; i >= 0 && excess > 0; i--)
-                {
-                    ProtPair pair = protectionPairs[i];
-                    int q = PairQty(pair);
-                    if (q <= 0) continue;
-
-                    // Las dos patas del par se tocan a la vez: recortar una sola
-                    // deja la otra cubriendo de mas y sin su OCO.
-                    if (q <= excess)
-                    {
-                        if (pair.Stop   != null && IsLive(pair.Stop))   cancel.Add(pair.Stop);
-                        if (pair.Target != null && IsLive(pair.Target)) cancel.Add(pair.Target);
-                        excess -= q;
-                    }
-                    else
-                    {
-                        int left = q - excess;
-                        if (pair.Stop   != null && IsLive(pair.Stop))   { pair.Stop.QuantityChanged   = left; change.Add(pair.Stop); }
-                        if (pair.Target != null && IsLive(pair.Target)) { pair.Target.QuantityChanged = left; change.Add(pair.Target); }
-                        excess = 0;
-                    }
-                }
+                TrimSide(true,  netLong,  now, change, cancel);
+                TrimSide(false, netShort, now, change, cancel);
             }
+
+            if (cancel.Count == 0 && change.Count == 0) return;
 
             try
             {
                 if (cancel.Count > 0) account.Cancel(cancel);
                 if (change.Count > 0) account.Change(change);
-                Status("SL/TP recortado a " + target + "c.");
+                Status(netLong == 0 && netShort == 0
+                       ? "Sin posición: cancelado el SL/TP que quedaba suelto."
+                       : "SL/TP ajustado a la posición neta.");
             }
             catch (Exception ex)
             {
-                Status("No se pudo recortar el SL/TP: " + ex.Message
-                       + ". Hazlo a mano: protege más que la posición y al saltar abre en contra.");
+                Status("No se pudo ajustar el SL/TP: " + ex.Message
+                       + ". Hazlo a mano: proteger más que la posición abre en contra al saltar.");
             }
         }
 
-        private void CancelOrphanProtection(Position position)
+        // Llamar con pendingLock tomado.
+        //
+        // Los pares dentro del margen no cuentan NI para la suma NI para el
+        // recorte. Si contaran, durante ese margen la posicion todavia no incluye
+        // su fill, sobraria cobertura y se recortaria el par ANTERIOR: justo el
+        // que si esta protegiendo contratos reales.
+        private void TrimSide(bool isLong, int allowed, long now, List<Order> change, List<Order> cancel)
         {
-            List<Order> doomed = null;
-            lock (pendingLock)
+            int covered = 0;
+            foreach (ProtPair pair in protectionPairs)
+                if (pair.IsLong == isLong && now - pair.SentMs >= ProtectionGraceMs)
+                    covered += PairQty(pair);
+
+            if (covered <= allowed) return;
+
+            // Se recorta por el final, que es el tramo mas reciente.
+            int excess = covered - allowed;
+            for (int i = protectionPairs.Count - 1; i >= 0 && excess > 0; i--)
             {
-                if (protectionPairs.Count == 0) { sawPosition = false; return; }
+                ProtPair pair = protectionPairs[i];
+                if (pair.IsLong != isLong) continue;
+                if (now - pair.SentMs < ProtectionGraceMs) continue;
 
-                if (position != null) { sawPosition = true; return; }
-                if (!sawPosition) return;
+                int q = PairQty(pair);
+                if (q <= 0) continue;
 
-                doomed = new List<Order>();
-                foreach (ProtPair pair in protectionPairs)
+                // Las dos patas del par se tocan a la vez: recortar una sola
+                // deja la otra cubriendo de mas y sin su OCO.
+                if (q <= excess)
                 {
-                    if (pair.Stop   != null) doomed.Add(pair.Stop);
-                    if (pair.Target != null) doomed.Add(pair.Target);
+                    if (pair.Stop   != null && IsLive(pair.Stop))   cancel.Add(pair.Stop);
+                    if (pair.Target != null && IsLive(pair.Target)) cancel.Add(pair.Target);
+                    excess -= q;
+                    // Fuera de la lista YA. La cancelacion tarda en confirmarse y
+                    // el barrido de dentro de un segundo volveria a verlo vivo y
+                    // a mandarla otra vez.
+                    protectionPairs.RemoveAt(i);
                 }
-                protectionPairs.Clear();
-                sawPosition = false;
-            }
-
-            List<Order> live = doomed.FindAll(o =>
-                o.OrderState == OrderState.Working
-             || o.OrderState == OrderState.Accepted
-             || o.OrderState == OrderState.Submitted
-             || o.OrderState == OrderState.TriggerPending);
-            if (live.Count == 0) return;
-
-            try
-            {
-                account.Cancel(live);
-                Status("Posición cerrada por fuera: cancelado el SL/TP que quedaba suelto.");
-            }
-            catch (Exception ex)
-            {
-                Status("No se pudo cancelar el SL/TP huerfano: " + ex.Message + ". Cancélalo a mano.");
+                else
+                {
+                    int left = q - excess;
+                    if (pair.Stop   != null && IsLive(pair.Stop))   { pair.Stop.QuantityChanged   = left; change.Add(pair.Stop); }
+                    if (pair.Target != null && IsLive(pair.Target)) { pair.Target.QuantityChanged = left; change.Add(pair.Target); }
+                    excess = 0;
+                }
             }
         }
 
@@ -3178,7 +3170,12 @@ namespace NinjaTrader.NinjaScript.Indicators
                 // compartido no empareja nada y algunos brokers lo rechazan.
                 string oco = (stopPrice > 0 && targetPrice > 0) ? Guid.NewGuid().ToString("N") : string.Empty;
 
-                ProtPair pair = new ProtPair { Quantity = quantity };
+                ProtPair pair = new ProtPair
+                {
+                    Quantity = quantity,
+                    IsLong   = bracket.IsLong,
+                    SentMs   = clock.ElapsedMilliseconds
+                };
                 List<Order> exits = new List<Order>();
                 if (stopPrice > 0)
                 {
@@ -3265,6 +3262,9 @@ namespace NinjaTrader.NinjaScript.Indicators
             lock (pendingLock)
                 foreach (ProtPair pair in protectionPairs)
                 {
+                    // Solo los stops del lado de la posicion. Un par del lado
+                    // contrario aun sin reajustar no es proteccion de esto.
+                    if (pair.IsLong != isLong) continue;
                     Order o = pair.Stop;
                     if (o == null || !IsLive(o)) continue;
                     // Nunca hacia atras: el break-even solo mejora el stop.
