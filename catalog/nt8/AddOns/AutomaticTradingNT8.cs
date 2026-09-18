@@ -13,12 +13,17 @@
 //
 //  API PARA UNA STRATEGY PROPIA (gate preventivo):
 //    if (AutomaticTradingBridge.CheckTrade(tag, lots, type, barTime, priority,
-//                                          out magic, out reason, Account.Name))
+//                                          out magic, out reason, Account.Name,
+//                                          Instrument.MasterInstrument.Name))
 //    {
 //        EnterLong(qty, AutomaticTradingBridge.OrderTag(tag, magic));
 //        AutomaticTradingBridge.Release(tag, Account.Name);
 //    }
 //  type: 0=Buy, 1=Sell. barTime: ToTime(Time[0]). priority: 0 = sin turno.
+//  El instrumento es lo que permite a la app gatear por SIMBOLO (filtro de
+//  noticias): una conexion NT8 sirve a varias estrategias e instrumentos, asi
+//  que no cabe en el LOGIN como en un EA de MT5. Omitirlo deja la entrada sin
+//  filtro de noticias hasta que la estrategia tenga su primer fill.
 //  El OrderTag DEBE ser el nombre de la entrada: NT8 no tiene Magic Number y es
 //  lo unico que ata la posicion a su magic. Las estrategias de TERCEROS no
 //  necesitan nada: las gatea ReactiveMode.
@@ -495,14 +500,22 @@ namespace NinjaTrader.NinjaScript.AddOns
         /// accountName: PASARLO SIEMPRE (`Account.Name`). Con varias cuentas
         /// puenteadas, omitirlo gatea contra la cuenta del feed y sus limites no son
         /// los de la que va a recibir la orden.
+        ///
+        /// instrument: PASARLO SIEMPRE (`Instrument.MasterInstrument.Name`). Es lo
+        /// unico que le dice a la app SOBRE QUE se va a operar, y sin eso el filtro
+        /// de noticias no puede saber si la noticia afecta a esta entrada: una
+        /// conexion NT8 sirve a varias estrategias y varios instrumentos, asi que
+        /// el simbolo no cabe en el LOGIN como en un EA de MT5. Si se omite se usa
+        /// el ultimo instrumento visto para este magic, que no existe hasta el
+        /// primer fill.
         /// </summary>
-        public static bool CheckTrade(string strategyTag, double lots, int type, long barTime, int priority, out int magic, out string reason, string accountName = null)
+        public static bool CheckTrade(string strategyTag, double lots, int type, long barTime, int priority, out int magic, out string reason, string accountName = null, string instrument = null)
         {
             magic = 0;
             reason = "";
             var inst = _instance;
             if (inst == null) { reason = "bridge_not_loaded"; return true; } // fail-open: AddOn no cargado
-            return inst.CheckTradeInternal(strategyTag, lots, type, barTime, priority, accountName, out magic, out reason);
+            return inst.CheckTradeInternal(strategyTag, lots, type, barTime, priority, accountName, instrument, out magic, out reason);
         }
 
         public static void Release(string strategyTag, string accountName = null)
@@ -528,7 +541,7 @@ namespace NinjaTrader.NinjaScript.AddOns
             return _dataLink;
         }
 
-        private bool CheckTradeInternal(string strategyTag, double lots, int type, long barTime, int priority, string accountName, out int magic, out string reason)
+        private bool CheckTradeInternal(string strategyTag, double lots, int type, long barTime, int priority, string accountName, string instrument, out int magic, out string reason)
         {
             reason = "";
             int magicLocal = GetOrAssignMagic(strategyTag);
@@ -547,11 +560,36 @@ namespace NinjaTrader.NinjaScript.AddOns
                 return conn.EverConnected == false; // nunca conecto -> asumir app cerrada, operar libre
             }
 
-            string msg = string.Format(CultureInfo.InvariantCulture, "CHECK_TRADE|{0}|{1:F2}|{2}|{3}", type, lots, barTime, priority);
+            // Instrumento de la entrada, para que la app pueda gatear por simbolo
+            // (filtro de noticias, regimen). Si la estrategia no lo pasa, el ultimo
+            // que se le vio a este magic — best-effort: no existe hasta el primer
+            // fill, asi que una estrategia que no lo pase no gatea su primer trade.
+            string sym = NormalizeRoot(instrument);
+            if (string.IsNullOrEmpty(sym))
+            {
+                string cached;
+                if (link.MagicToInstrument.TryGetValue(magicLocal, out cached)) sym = cached;
+            }
+
+            // Sin simbolo se manda la forma de 4 campos de siempre: el quinto es
+            // OPCIONAL y los EAs de MT5 (SocketLib.mqh) siguen mandando cuatro.
+            string msg = string.IsNullOrEmpty(sym)
+                ? string.Format(CultureInfo.InvariantCulture, "CHECK_TRADE|{0}|{1:F2}|{2}|{3}", type, lots, barTime, priority)
+                : string.Format(CultureInfo.InvariantCulture, "CHECK_TRADE|{0}|{1:F2}|{2}|{3}|{4}", type, lots, barTime, priority, sym);
             string response = conn.SendAndWait(msg, CheckTradeTimeoutMs);
             if (response.StartsWith("ALLOW", StringComparison.Ordinal))
             {
-                link.InstrumentToMagic[strategyTag] = magic; // best-effort, se refina en OnExecutionUpdate
+                // Mapeo por RAIZ, no por strategyTag: el resto del AddOn consulta
+                // estos dos diccionarios con la raiz del instrumento (SendState,
+                // CMD_CLOSE), asi que una clave con el nombre de la estrategia no
+                // casaba con nada. Con la raiz, el respaldo de arriba ya tiene
+                // valor en el segundo CHECK_TRADE, sin esperar al primer fill.
+                // Se refina igual en OnExecutionUpdate.
+                if (!string.IsNullOrEmpty(sym))
+                {
+                    link.InstrumentToMagic[sym] = magic;
+                    link.MagicToInstrument[magic] = sym;
+                }
                 return true;
             }
             reason = response;
@@ -726,10 +764,17 @@ namespace NinjaTrader.NinjaScript.AddOns
             long barTime = DateTime.Now.Ticks;
 
             // priority=0: solo gates globales y limites, sin semaforo de turnos.
+            //
+            // El instrumento va SIEMPRE en el campo 5: esta conexion es la de la
+            // CUENTA y da servicio a todos los instrumentos, asi que su LOGIN no
+            // puede identificar el simbolo (lleva el nombre de la cuenta). Sin
+            // esto, el filtro de noticias no tiene contra que casar la divisa.
+            CacheInstrument(o.Instrument);
+            string sym = RootSymbol(o.Instrument);
             string resp = "ALLOW";
             if (link.Conn != null && link.Conn.IsLoggedIn)
             {
-                string msg = string.Format(CultureInfo.InvariantCulture, "CHECK_TRADE|{0}|{1:F2}|{2}|0", type, lots, barTime);
+                string msg = string.Format(CultureInfo.InvariantCulture, "CHECK_TRADE|{0}|{1:F2}|{2}|0|{3}", type, lots, barTime, sym);
                 resp = link.Conn.SendAndWait(msg, CheckTradeTimeoutMs);
             }
 
@@ -2139,6 +2184,21 @@ namespace NinjaTrader.NinjaScript.AddOns
             return instr.MasterInstrument != null ? instr.MasterInstrument.Name : instr.FullName;
         }
 
+        // Lo mismo pero sobre un nombre que nos dan escrito. La estrategia deberia
+        // pasar Instrument.MasterInstrument.Name, pero si pasa el FullName
+        // ("MNQ 12-26") se queda la raiz igualmente: el resto del protocolo habla
+        // en raices y una mezcla romperia el mapeo de simbolos.
+        private static string NormalizeRoot(string name)
+        {
+            if (string.IsNullOrEmpty(name)) return "";
+            name = name.Trim();
+            int sp = name.IndexOf(' ');
+            if (sp > 0) name = name.Substring(0, sp);
+            // El '|' es el separador del protocolo: uno colado dentro del nombre
+            // partiria el mensaje en dos campos.
+            return name.Replace("|", "");
+        }
+
         // Cache raiz -> instrumento, sembrada con todo lo que vemos.
         private readonly ConcurrentDictionary<string, NinjaTrader.Cbi.Instrument> _rootCache =
             new ConcurrentDictionary<string, NinjaTrader.Cbi.Instrument>();
@@ -2434,10 +2494,15 @@ namespace NinjaTrader.NinjaScript.AddOns
     {
         /// <summary>accountName: pasar SIEMPRE `Account.Name` desde la strategy.
         /// Con varias cuentas NT8 puenteadas, omitirlo gatea contra la cuenta del
-        /// feed y no contra la que va a recibir la orden.</summary>
-        public static bool CheckTrade(string strategyTag, double lots, int type, long barTime, int priority, out int magic, out string reason, string accountName = null)
+        /// feed y no contra la que va a recibir la orden.
+        ///
+        /// instrument: pasar SIEMPRE `Instrument.MasterInstrument.Name`. Es lo que
+        /// deja a la app gatear por simbolo (filtro de noticias); omitirlo cae en
+        /// el ultimo instrumento visto para ese magic, que no existe hasta el
+        /// primer fill.</summary>
+        public static bool CheckTrade(string strategyTag, double lots, int type, long barTime, int priority, out int magic, out string reason, string accountName = null, string instrument = null)
         {
-            return AutomaticTradingNT8.CheckTrade(strategyTag, lots, type, barTime, priority, out magic, out reason, accountName);
+            return AutomaticTradingNT8.CheckTrade(strategyTag, lots, type, barTime, priority, out magic, out reason, accountName, instrument);
         }
 
         public static void Release(string strategyTag, string accountName = null) { AutomaticTradingNT8.Release(strategyTag, accountName); }

@@ -1,6 +1,6 @@
 # Manual de usuario — AT OrderFlow Footprint
 
-Versión: 4.34+.
+Versión: 4.36+.
 
 Guía de **uso**: qué ves en pantalla, qué hace cada botón y para qué sirve.
 No hay código aquí.
@@ -34,10 +34,13 @@ Con `VOL_REAL` sin puente conectado verás **ceros** — ése es el error típic
 ## 2. Primer arranque (orden que funciona)
 
 1. Arrastra el EA al gráfico. Permite **Trading algorítmico** (si no, no dibuja el panel TRADE).
-2. Deja `VolumeSource = VOL_TICK` la primera vez. Comprueba que salen números en las celdas.
-3. Elige tema con **Claro / Oscuro** (cambia también el fondo del gráfico, y se restaura al quitar el EA).
-4. Ajusta la vista con **Z+ / Z− / ▲ / ▼**, y **Rst** para volver al encuadre automático.
-5. Apaga lo que no mires. Cada panel encendido come ancho de gráfico.
+2. **Arranca en modo `MT5 ON`**: ves las velas normales de MetaTrader, sin casillas. Pulsa
+   el botón **MT5** (el primero de la fila de estilos, arriba a la derecha) para pasarlo a
+   `OFF` y que aparezca el footprint. Es un interruptor: puedes ir y volver cuando quieras.
+3. Deja `VolumeSource = VOL_TICK` la primera vez. Comprueba que salen números en las celdas.
+4. Elige tema con **Claro / Oscuro** (cambia también el fondo del gráfico, y se restaura al quitar el EA).
+5. Ajusta la vista con **Z+ / Z− / ▲ / ▼**, y **Rst** para volver al encuadre automático.
+6. Apaga lo que no mires. Cada panel encendido come ancho de gráfico.
 
 **Si vas a usar volumen real (NinjaTrader):**
 
@@ -166,13 +169,13 @@ VP, Table y Header**; el resto lo enciendes tú.
 | **MAs** | Medias 9/21/50 + VWAP anclado a la apertura del día | Contexto de tendencia |
 | **Round** | Zonas de números redondos, con banda. Al encenderlo aparece debajo la fila **Paso** | Siempre. Es donde se acumulan órdenes y stops |
 | **Std** | Pivotes diarios clásicos: PP, R1-R3, S1-S3 | Referencia intradía de toda la vida |
-| **Fibo** | Pivotes por Fibonacci: PP, R1-R3, S1-S3, con el **ratio en la etiqueta** (`38.2%`, `61.8%`, `100%`) | Si trabajas con retrocesos |
+| **Fibo** | **Retroceso** Fibonacci del rango de ayer: `0 / 23.6 / 38.2 / 50 / 61.8 / 78.6 / 100%`, con el ratio en la etiqueta | Buscar el punto de entrada dentro del movimiento de ayer |
 | **Cam** | Pivotes Camarilla: PP, R1-R4, S1-S4 | Días de rango: R3/R4 son los de reversión |
-| **Woody** | Pivotes Woodie: PP, R1-R4, S1-S4 | Variante con más peso en el cierre |
+| **Woody** | Pivotes Woodie: PP, R1-R4, S1-S4. Su `PP` pondera el cierre: `(H+L+2C)/4` | Variante con más peso en el cierre |
 | **DeMark** | Pivotes DeMark: **solo PP, R1 y S1** | Cuando quieres una única referencia limpia |
 | **Murrey** | Murrey Math: cuadrícula de octavos, de 0/8 a 8/8 (más ±1/8, ±2/8) | Marco de precio "cuadriculado" |
 | **VolPiv** | Volatility pivot: **una** línea que camina con el precio | Como stop dinámico / filtro de tendencia |
-| **Session** | Máximo y mínimo de la última sesión cerrada de Asia, Londres y Nueva York | Para operar contra el rango de la sesión anterior |
+| **Session** | Máximo y mínimo de la última sesión cerrada de Asia, Londres y Nueva York, **con el tramo horario de cada una marcado** | Para operar contra el rango de la sesión anterior |
 | **PDH/PDL** | Máximo y mínimo del día anterior | Casi siempre: son objetivos de liquidez |
 
 **Todas son independientes: enciende las que uses y apaga el resto.** Cada etiqueta
@@ -186,8 +189,9 @@ pisan con las demás.
 por debajo**. Los demás existen, pero no se dibujan: con cuatro familias encendidas a
 la vez eran treinta cajas apiladas en la misma columna y no se leía ninguna. Las
 etiquetas van en el **margen izquierdo del gráfico**, fuera de las celdas del
-footprint. **PDH/PDL** es la excepción: si lo enciendes salen los dos siempre, estén
-donde estén, porque para eso lo has encendido.
+footprint. Hay dos excepciones: **PDH/PDL**, que si lo enciendes saca los dos siempre,
+estén donde estén, porque para eso lo has encendido; y **Fibo**, que dibuja sus **siete**
+niveles — un retroceso al que le faltan tramos no se lee.
 
 Detalle de qué mira cada una:
 
@@ -198,7 +202,14 @@ Detalle de qué mira cada una:
 - **Std / Fibo / Cam / Woody / DeMark** — el **día de ayer**: la vela diaria ya
   cerrada. Se calculan una vez y no se mueven en toda la sesión, que es justamente
   para lo que sirven. DeMark es el único que además mira la **apertura** de ayer (por
-  eso da solo tres líneas: es su diseño, no un fallo).
+  eso da solo tres líneas: es su diseño, no un fallo). Los cinco parten del **mismo**
+  máximo y mínimo, el de la vela diaria, así que sus rangos cuadran entre sí y con
+  PDH/PDL.
+- **Fibo no es un pivote, es un retroceso.** Coge los dos extremos de ayer y reparte
+  entre ellos `0 / 23.6 / 38.2 / 50 / 61.8 / 78.6 / 100%`. El **0% va en el extremo más
+  reciente**: si ayer el máximo se hizo después del mínimo, el 0% está arriba, como si
+  hubieras trazado la herramienta a mano de abajo a arriba. Sus líneas del 0% y el 100%
+  coinciden exactamente con PDH y PDL.
 - **PDH/PDL** — también el día de ayer, pero sin fórmula: su máximo (naranja) y su
   mínimo (azul) tal cual.
 - **Murrey** — los **últimos 64 días cerrados**. Divide ese rango en octavos: el
@@ -212,17 +223,30 @@ Detalle de qué mira cada una:
   de Nueva York). Seis líneas, un par por plaza, cada una del color que esa plaza
   tiene en la tira de sesión. Ver el detalle en **5.6**.
 
+**De dónde sale cada rango, dibujado.** Cuando enciendes cualquier familia que dependa
+de un máximo y un mínimo, el gráfico marca **con qué** se ha calculado:
+
+- **Diagonal naranja `D-1`** — une los dos extremos del día anterior, del **más antiguo
+  al más reciente**, con un círculo en cada ancla y el tamaño del rango en la etiqueta
+  (`D-1 0.00437`). Sale con Std, Fibo, Cam, Woody, DeMark o PDH/PDL encendidos. Murrey
+  dibuja la suya aparte, en su color, porque su rango son 64 días y no uno.
+- **Barra horizontal con topes bajo cada sesión** — con **Session** encendido, cada plaza
+  marca de su primera a su última vela y pone sus horas **del servidor**: `LON 10:00-19:00`.
+  Es la forma de comprobar que la ventana horaria es la que crees sin fiarte de nadie.
+- Si el día o la sesión de origen han quedado fuera de pantalla, no se dibuja nada: no hay
+  dónde anclar la marca.
+
 #### La fila `Paso` (zonas redondas)
 
 Con **Round** encendido aparece una fila más, justo debajo de los chips de Niveles:
 
 ```
-Paso   10   20   50  [100]  200  500
+Paso   10   20   50  [100]  200  500  1000
 ```
 
 El botón verde es el que está puesto. **Los números son el paso real de ese símbolo**,
-no un porcentaje: en US100 lees `10 20 50 100 200 500`, en oro `1 2 5 10 20 50`, en
-EURUSD `10p 20p 50p 100p 200p 500p` (pips). Un clic y se repinta.
+no un porcentaje: en US100 lees `10 20 50 100 200 500 1000`, en oro `1 2 5 10 20 50 100`,
+en EURUSD `10p 20p 50p 100p 200p 500p 1000p` (pips). Un clic y se repinta.
 
 El paso **no cambia al hacer zoom**: un número redondo es una referencia fija del
 mercado, no algo que dependa de cómo tengas encuadrado el gráfico. Solo cambia solo si
@@ -257,14 +281,28 @@ lectura:
 
 | Botón | Ves | Úsalo para |
 |---|---|---|
+| **MT5 ON/OFF** | **No es un estilo: es un interruptor.** `ON` = velas normales de MetaTrader, sin casillas. `OFF` = footprint | Ver el gráfico de siempre sin quitar el EA |
 | **BxA** | Dos números: bid (izq) y ask (der) | Lectura clásica de footprint. El punto de partida |
 | **Delta** | Un número: ask − bid | Ver rápido qué lado ganó cada nivel |
 | **Heat** | Volumen total, coloreado por intensidad | Localizar HVN (imán) y LVN (el precio pasa rápido) |
 | **Prof** | Barras horizontales bid izquierda / ask derecha | Ver la forma del reparto sin leer cifras |
-| **VPo** | Barra de volumen total, izquierda→derecha | Perfil de volumen dentro de la propia vela |
+| **VPc** | Barra de volumen total, izquierda→derecha | Perfil de volumen dentro de la propia vela |
 | **Mid** | Barra de volumen centrada en la columna | Vista simétrica, menos ruido |
 
 Regla práctica: **BxA** para estudiar una vela, **Heat** o **Delta** para escanear muchas.
+
+**El modo MT5, en detalle.** Para dibujar su rejilla, el EA oculta las velas nativas del
+gráfico y encuadra la escala él mismo. Con **MT5 en `ON`** deja de hacer las dos cosas:
+vuelven las velas de MetaTrader y vuelves a tener **scroll y zoom normales** con el ratón.
+
+- **Se apagan** las casillas, los números, el POC de cada vela, el cuadro `Δ/V` y la vela
+  dibujada a mano (si no, verías dos velas superpuestas).
+- **Sigue todo lo demás**, recolocado sobre las velas de MetaTrader: niveles, perfil de
+  sesión, zonas, estructura, medias, tabla, histograma, CVD, tira de sesión y paneles.
+- **Con muchas velas en pantalla no hay números por columna.** Una vela de MetaTrader mide
+  pocos píxeles: la tabla y el histograma se leen entonces como franjas de color. Amplía el
+  gráfico y los números vuelven.
+- El estilo que tuvieras elegido (BxA, Delta…) **no se pierde**: vuelve al pasar a `OFF`.
 
 ### 4.3 Zoom y tema
 
@@ -391,7 +429,8 @@ presión agresiva acumulada de las últimas ~8 velas, normalizadas al lado más 
   está **por encima** (te hace de resistencia), verde si está **por debajo** (te hace de
   soporte). Una `R1` que el precio ya ha superado sale verde, porque a partir de ahí es
   soporte. El **eje** de cada sistema —el `PP`, el `4/8` de Murrey— va aparte, en el color
-  de cabecera, y se pinta siempre.
+  de cabecera, y se pinta siempre. En **Fibo** el papel del eje lo hacen el `0%` y el
+  `100%`: van en el naranja de la diagonal, porque son sus dos anclas.
   Las de **Round** llevan además una banda tenue: el redondo no es un precio exacto, es una
   zona.
 - **Todo cae en su precio real.** Desde la **v4.32** la rejilla del footprint coincide
@@ -413,6 +452,15 @@ presión agresiva acumulada de las últimas ~8 velas, normalizadas al lado más 
     horas y media de la apertura, que es donde se mueve el precio.
   - **No hay niveles de solape.** No existe `ASIA&LON` ni `LON&NY` como sesión propia:
     esas horas cuentan para las dos plazas que las comparten, y nada más.
+  - **Cada plaza marca su tramo.** Bajo su mínimo sale una barra con topes que va de la
+    primera a la última vela de esa sesión, con las horas **del servidor**
+    (`LON 10:00-19:00`), y una diagonal que une su máximo con su mínimo. Ojo: la diagonal
+    dice dónde se hicieron los extremos, **no** cuándo abrió la plaza — el mínimo de
+    Londres puede caer a media sesión. Para el horario, mira la barra.
+  - **Las horas se calculan con la hora del bróker, nunca con la del PC.** El desfase se
+    mide en las velas (por el cierre del viernes, que es igual en todos los brókers). La
+    tira de sesión del pie muestra el resultado: `Ses GMT+3`. Si pone `?`, es que no se
+    ha podido medir y esos cortes pueden estar desplazados.
   - Si una plaza no sale, es que el histórico de M5 no llega a cubrir su última sesión
     completa. Se prefiere no dibujar nada antes que dibujar un rango truncado.
 - **PDH / PDL** (botón **PDH/PDL** de la fila **Niveles**) — máximo (naranja) y mínimo
@@ -570,6 +618,7 @@ tal como aparece en esa lista**.
 
 | Quiero | Ajuste en la ventana de propiedades | Valor |
 |---|---|---|
+| Arrancar viendo el footprint en vez de las velas de MetaTrader | *Arrancar en modo MT5 (velas nativas, sin casillas)* | Ponlo en `false`. Da igual cómo arranque: el botón **MT5** lo cambia en caliente |
 | Celdas de precio más gruesas o más finas | *Semilla de step (auto por VOLATILIDAD, universal)* | Déjalo en `true` y se calcula solo en cualquier activo |
 | …y afinar esa granularidad | *Celdas objetivo por ATR de barra (granularidad)* | Más celdas = rejilla más fina (12 por defecto) |
 | …o fijarlo yo a mano | *Ticks/Pips Per Price Level (según StepMode)* | Solo si pones la semilla automática en `false` |
@@ -586,7 +635,7 @@ tal como aparece en esa lista**.
 | Ver más tiempo de golpe en el mapa de calor | *Intervalo de cada columna (ms)* | 1000 ≈ 3,7 min · 5000 ≈ 18 min · 15000 ≈ 55 min |
 | Que aparezca alguna absorción (no veo ninguna) | *Absorción: percentil del volumen por nivel* | Baja a 70 para comprobar que vive; 90 es deliberadamente raro |
 | Más o menos bloques marcados | *Umbral = media + k·desviación* | 2.0 ≈ 21/min · 2.5 ≈ 11/min · 3.5 ≈ 3,6/min (por defecto) |
-| Zonas redondas más separadas o más juntas | La fila **Paso** en el gráfico (no hace falta abrir propiedades) | US100: 10/20/50/**100**/200/500 |
+| Zonas redondas más separadas o más juntas | La fila **Paso** en el gráfico (no hace falta abrir propiedades) | US100: 10/20/50/**100**/200/500/1000 |
 | …y que arranque siempre con el paso que quiero | *(auto) paso: multiplicador de la base* | `x1` por defecto. Solo siembra el arranque; luego manda el botón |
 | …o fijar yo el intervalo redondo | *Intervalo automatico por decada del precio* a `false` + *(manual) intervalo en pips* | 50 pips por defecto |
 | Bandas redondas más anchas | *Ancho de la zona en pips* | 10 por defecto (se auto-escala con el intervalo) |
@@ -594,7 +643,7 @@ tal como aparece en esa lista**.
 | Murrey sobre más o menos historia | *Murrey Math: velas D1 del octavo* | 64 por defecto |
 | VolPiv más pegado o más suelto | *Volatility pivot: factor ATR* | 3.0 por defecto. Menos = más pegado y más cruces |
 | Cambiar la hora de apertura o cierre de una plaza | *Sesion: apertura/cierre Asia · Londres · Nueva York* | Formato **HHMM** en la hora **local de esa plaza**: `930` = 09:30, `1600` = 16:00. Nueva York viene con el contado (`930`–`1600`); si operas futuros pon `800`–`1700` |
-| Que el desfase del broker no se mida solo | *Offset GMT del broker en horas* | `99` = automático (se mide en las velas). Pon el número (`3`, `-5`…) si tu PC tiene mal la zona horaria y prefieres fijarlo |
+| Que el desfase del bróker no se mida solo | *Offset GMT del broker en horas* | `99` = automático: se mide en las velas del bróker (cierre del viernes), **nunca con el reloj del PC**. Pon el número (`3`, `-5`…) solo si quieres fijarlo tú |
 | Cambiar el símbolo con el que se mide ese desfase | *Simbolo FX de referencia para medir el offset del broker* | `EURUSD`. Ponle el sufijo de tu broker si allí se llama distinto |
 
 ---
@@ -610,7 +659,9 @@ tal como aparece en esa lista**.
 | No aparecen bloques | El umbral adaptativo necesita ~30 bloques acumulados | Espera, o baja *Umbral = media + k·desviación* |
 | Faltan las marcas de bloque aunque las haya | La fila mide menos de 6 px | **Z+** hasta que la celda respire |
 | No hay absorción en toda la sesión | Percentil 90 es exigente | *Absorción: percentil del volumen por nivel* a 70 para verificar; luego devuélvelo |
+| No veo casillas, solo velas normales | Está en **modo MT5** (así arranca por defecto) | Pulsa **MT5** para pasarlo a `OFF` |
 | No veo números en las celdas | Zoom demasiado reducido, se ocultan a propósito | **Z+** o **Rst** |
+| La tabla de abajo son franjas de color sin números | Modo MT5 con muchas velas: no caben | Amplía el gráfico, o pasa **MT5** a `OFF` |
 | La escala salta sola | El auto-encuadre pisa el arrastre manual | Es el comportamiento; usa **Z+/Z−/▲/▼** en vez de arrastrar la escala |
 | Un botón no responde | Puede haber quedado tapado por el texto de cabecera | Ensancha ventana; desde v4.21 la fila se aparta sola |
 | **DeMark** solo pinta 3 líneas | Es su fórmula: solo define PP, R1 y S1 | No es un fallo. Si quieres 4 niveles usa **Fibo**, **Cam** o **Woody** |
