@@ -12,9 +12,9 @@
       "platform": "mt5",
       "kind": "Experts",
       "file": "AT_OrderFlow_Footprint.ex5",
-      "version": "4.36",
-      "sha256": "13db88237ce7297363affe1354ded24be7b09e73053da453b9c68cfa83695b2b",
-      "notes": "Boton MT5: apaga las casillas y deja las velas nativas de MetaTrader, con scroll y zoom normales; todo lo demas (niveles, perfil, tabla, CVD, tira de sesion) se recoloca sobre ellas. El chip Fibo pasa a ser el RETROCESO del rango de ayer (0 / 23.6 / 38.2 / 50 / 61.8 / 78.6 / 100%), no pivotes. Corregidos el PP de Woodie ((H+L+2C)/4) y el de Camarilla ((H+L+C)/3). Las sesiones ya no se pintan una hora corrida: el desfase GMT del broker se mide por el cierre del viernes y nunca con el reloj del PC; ademas cada plaza marca su tramo horario y el origen del rango se dibuja con una diagonal. Tira de sesion a 3 dias. Zonas redondas con un paso mas (x10). Botones mas legibles y botonera que ya no tapa el nombre del EA. Del 4.35: SL y TP opcionales en el panel TRADE, y precios de nivel que ya no se cortan.",
+      "version": "4.37",
+      "sha256": "96c84c72f5e7ae6a925ec39412464e4a885f1e22b7a8d9d5d4774d9651084cb7",
+      "notes": "Arreglado el desplazamiento de todo lo dibujado con el zoom alejado: el alto de fila que posiciona la rejilla se acotaba a un pixel, y ese redondeo separaba los niveles, BOS/SWEEP, medias y zonas de su precio cuanto mas lejos del ancla. Al conmutar el boton MT5 el eje ya no queda desplazado un frame. La estructura vuelve a marcar las primeras velas de la pantalla (antes descartaba 60 px de la izquierda, que son el eje de la rejilla propia). Las marcas de absorcion van con las celdas: sin ellas quedaba un cuadradito suelto sobre las velas. Fibo: ahora sale del tramo con trece niveles y una sola escala (0% en el extremo mas reciente de ayer, 100% en el mas antiguo); los negativos son los objetivos de proyeccion y los de mas de 100% quedan por detras del arranque. Cada linea del fibo lleva etiqueta en los dos extremos.",
       "min_app": "1.6",
       "manual": "AT_OrderFlow_Footprint.md"
     },

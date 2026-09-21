@@ -1,6 +1,6 @@
 # Manual de usuario — AT OrderFlow Footprint
 
-Versión: 4.36+.
+Versión: 4.37+.
 
 Guía de **uso**: qué ves en pantalla, qué hace cada botón y para qué sirve.
 No hay código aquí.
@@ -169,7 +169,7 @@ VP, Table y Header**; el resto lo enciendes tú.
 | **MAs** | Medias 9/21/50 + VWAP anclado a la apertura del día | Contexto de tendencia |
 | **Round** | Zonas de números redondos, con banda. Al encenderlo aparece debajo la fila **Paso** | Siempre. Es donde se acumulan órdenes y stops |
 | **Std** | Pivotes diarios clásicos: PP, R1-R3, S1-S3 | Referencia intradía de toda la vida |
-| **Fibo** | **Retroceso** Fibonacci del rango de ayer: `0 / 23.6 / 38.2 / 50 / 61.8 / 78.6 / 100%`, con el ratio en la etiqueta | Buscar el punto de entrada dentro del movimiento de ayer |
+| **Fibo** | Fibonacci del rango de ayer, **retroceso y extensión**: trece niveles de `-161.8%` a `161.8%`, con el ratio en la etiqueta | Entradas dentro del movimiento de ayer y objetivos fuera de él |
 | **Cam** | Pivotes Camarilla: PP, R1-R4, S1-S4 | Días de rango: R3/R4 son los de reversión |
 | **Woody** | Pivotes Woodie: PP, R1-R4, S1-S4. Su `PP` pondera el cierre: `(H+L+2C)/4` | Variante con más peso en el cierre |
 | **DeMark** | Pivotes DeMark: **solo PP, R1 y S1** | Cuando quieres una única referencia limpia |
@@ -190,8 +190,8 @@ por debajo**. Los demás existen, pero no se dibujan: con cuatro familias encend
 la vez eran treinta cajas apiladas en la misma columna y no se leía ninguna. Las
 etiquetas van en el **margen izquierdo del gráfico**, fuera de las celdas del
 footprint. Hay dos excepciones: **PDH/PDL**, que si lo enciendes saca los dos siempre,
-estén donde estén, porque para eso lo has encendido; y **Fibo**, que dibuja sus **siete**
-niveles — un retroceso al que le faltan tramos no se lee.
+estén donde estén, porque para eso lo has encendido; y **Fibo**, que dibuja sus **trece**
+niveles — un fibo al que le faltan tramos no se lee.
 
 Detalle de qué mira cada una:
 
@@ -205,11 +205,23 @@ Detalle de qué mira cada una:
   eso da solo tres líneas: es su diseño, no un fallo). Los cinco parten del **mismo**
   máximo y mínimo, el de la vela diaria, así que sus rangos cuadran entre sí y con
   PDH/PDL.
-- **Fibo no es un pivote, es un retroceso.** Coge los dos extremos de ayer y reparte
-  entre ellos `0 / 23.6 / 38.2 / 50 / 61.8 / 78.6 / 100%`. El **0% va en el extremo más
-  reciente**: si ayer el máximo se hizo después del mínimo, el 0% está arriba, como si
-  hubieras trazado la herramienta a mano de abajo a arriba. Sus líneas del 0% y el 100%
-  coinciden exactamente con PDH y PDL.
+- **Fibo no es un pivote.** Coge los dos extremos de ayer y trabaja **una sola escala**:
+  el **0% en el extremo más reciente** y el **100% en el más antiguo**, como si hubieras
+  trazado la herramienta a mano. El 0% y el 100% coinciden exactamente con PDH y PDL.
+  A partir de ahí, todo cuelga de la misma regla:
+
+  | Ratios | Dónde caen | Para qué |
+  |---|---|---|
+  | `-161.8 / -100 / -61.8 / -27.2%` | Fuera, hacia donde iba el movimiento | Objetivos de proyección |
+  | `0 / 23.6 / 38.2 / 50 / 61.8 / 78.6 / 100%` | Dentro del tramo | El retroceso de siempre |
+  | `127.2 / 161.8%` | Fuera, por detrás del arranque | El tramo deshecho y de más |
+
+  Son los ratios clásicos de expansión, escritos en la escala del retroceso. Si los
+  comparas con otra plataforma que los nombre "al revés": `-27.2%` es la proyección
+  `127.2%`, `-61.8%` es la `161.8%`, `-100%` es la `200%` y `-161.8%` es la `261.8%`.
+  Mismo precio, distinto nombre. Aquí se usa un solo criterio para las trece líneas.
+- **Las líneas del Fibo llevan etiqueta en los dos extremos**, a la izquierda como el
+  resto de familias y también pegada al borde derecho, que es por donde entra el precio.
 - **PDH/PDL** — también el día de ayer, pero sin fórmula: su máximo (naranja) y su
   mínimo (azul) tal cual.
 - **Murrey** — los **últimos 64 días cerrados**. Divide ese rango en octavos: el
@@ -329,7 +341,8 @@ vuelven las velas de MetaTrader y vuelves a tener **scroll y zoom normales** con
 - **Absorción** (celda con borde marcado) — alguien pasivo está parando el precio en ese nivel.
   Se marca **la celda**, no la vela, y **nunca en la vela viva**: hace falta ver si el precio
   falla en continuar. Es correcto que llegue tarde — en el momento no se distingue de
-  "todavía no ha subido".
+  "todavía no ha subido". Solo aparece **cuando hay celdas**: en modo MT5, o con el zoom por
+  debajo del piso legible, no hay casilla donde situarla y no se dibuja.
 
 ### 5.2 Carril derecho — perfil de sesión
 
