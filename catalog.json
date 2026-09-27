@@ -21,6 +21,24 @@
     {
       "platform": "mt5",
       "kind": "Experts",
+      "file": "AT_QuantNasdaqPro.ex5",
+      "version": "1.00",
+      "sha256": "4ef4a4851d0d6f1c5b2f637cb2465692960c45741807dceaf02fc7688bf91509",
+      "notes": "Estrategia cuantitativa de volatilidad y precio para el Nasdaq en H1. La entrada mide la rotura sobre el cierre diario con Bandas de Bollinger y se coloca como orden pendiente de compra; solo opera largos. Las salidas van por ATR: stop loss, break-even, trailing y cierre despues de un numero de velas. Recomendado en cuentas de spread bajo, desde 1000 USD. Una posicion a la vez; no usa grid ni martingala. Gestionado de fabrica: la aplicacion controla sus entradas con las reglas de riesgo de la cartera. El backtest no se ve afectado.",
+      "min_app": "1.6"
+    },
+    {
+      "platform": "mt5",
+      "kind": "Experts",
+      "file": "AT_SchermanActionPro.ex5",
+      "version": "1.40",
+      "sha256": "a0cd280ba75d5bb750c1b56b74c7140345e2f622aeb114307dc6d3a60b6297df",
+      "notes": "Accion del precio para el SP500 en diario. Entra por secuencia de velas del mismo signo confirmada por la pendiente de dos medias, con filtros de ATR minimo, de spread, de horario y de dia de la semana. Salidas configurables: take profit y stop loss fijos, por ATR o por indicador, mas cierres parciales, break-even y trailing. Incluye proteccion de balance por porcentaje maximo de perdida y avisos al movil por perdidas consecutivas. Una posicion a la vez; no usa grid ni martingala. Largos activos por defecto. Gestionado de fabrica: la aplicacion controla sus entradas con las reglas de riesgo de la cartera. El backtest no se ve afectado.",
+      "min_app": "1.6"
+    },
+    {
+      "platform": "mt5",
+      "kind": "Experts",
       "file": "AT_USDJPY_neuronnx_v3.ex5",
       "version": "3.00",
       "sha256": "f9de6fa757c3fa62beee7ba8750212b995f7d6dab53723b5176024b36ed0d06c",
