@@ -74,9 +74,9 @@
       "platform": "nt8",
       "kind": "AddOns",
       "file": "AutomaticTradingNT8.cs",
-      "version": "1.76",
-      "sha256": "39924afc2b377c34f12af4bcdfbee6e381b91de38e79610d9c37227d62b5f8aa",
-      "notes": "AddOn puente para NinjaTrader 8: gate de riesgo, copia de senales y datos compartidos con MT5. Puentea todas las cuentas conectadas a la vez, cada una como su propio terminal. Novedades: el filtro de noticias ya bloquea de verdad en NinjaTrader. Hasta ahora el instrumento se deducia del nombre de la cuenta (de Sim101 salia la divisa SIM) y no casaba con ninguna noticia, asi que pasaba todo. Ahora el instrumento viaja en el propio mensaje y CheckTrade admite un parametro instrument; las estrategias ya escritas compilan sin cambios. Se elige en la aplicacion que estrategias filtra cada noticia, y las de terceros se siguen gateando por instrumento con el modo reactivo. El cierre de posiciones antes de la noticia ya funciona en NT8: lo que no se pueda cerrar se lista como SIN CERRAR en vez de callarlo. Corregido el mapa instrumento-magic, que se indexaba por el nombre de la estrategia y no casaba nunca.",
+      "version": "1.77",
+      "sha256": "c153ef03e4c01ed5477270208e3bae0dab624cdacecd38f45d880aa53b0975e8",
+      "notes": "AddOn puente para NinjaTrader 8: gate de riesgo, copia de senales y datos compartidos con MT5. Puentea todas las cuentas conectadas a la vez, cada una como su propio terminal. Novedades 1.77: una orden denegada ya no cierra la posicion que tenias. Con el modo reactivo (ordenes manuales, de Chart Trader o de terceros), al denegar una entrada nueva se aplanaba el instrumento entero; ahora se cancela solo esa orden y, si llego a llenarse, se deshace solo lo que ella metio, tambien cuando el llenado llega despues de cancelarla. Ademas, el AddOn informa a la aplicacion de la conexion de cada cuenta con el broker, para avisar por Telegram cuando se pierde y cuando vuelve. Tras instalarlo hay que recompilar en NinjaScript (F5).",
       "min_app": "1.7"
     }
   ]

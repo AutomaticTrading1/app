@@ -196,6 +196,10 @@ namespace NinjaTrader.NinjaScript.AddOns
             // Worker propio: el SendAndWait no puede bloquear los eventos de NT8.
             public readonly BlockingCollection<Order> ReactiveQueue = new BlockingCollection<Order>(new ConcurrentQueue<Order>());
             public readonly ConcurrentDictionary<Order, byte> ReactiveSeen = new ConcurrentDictionary<Order, byte>();
+            // Entradas denegadas -> contratos suyos ya deshechos. Si una se llena
+            // despues de denegarla (la cancelacion llego tarde), se deshace lo
+            // llenado al verlo en OnOrderUpdate.
+            public readonly ConcurrentDictionary<Order, int> ReactiveDenied = new ConcurrentDictionary<Order, int>();
             public Thread ReactiveThread;
 
             // Conexion propia por strategy (el magic del socket lo fija el LOGIN).
@@ -207,6 +211,10 @@ namespace NinjaTrader.NinjaScript.AddOns
 
             // Ultimo STATE enviado, solo para trazar los CAMBIOS.
             public string LastPositionsCsv = null;
+
+            // Ultimo BROKER| enviado por la conexion actual: -1 = ninguno (se vuelve
+            // a -1 antes de cada LOGIN para que la app reciba el estado inicial).
+            public volatile int BrokerOk = -1;
         }
 
         protected override void OnStateChange()
@@ -312,10 +320,27 @@ namespace NinjaTrader.NinjaScript.AddOns
                 {
                     Log("AutomaticTradingNT8: cuenta '" + gone.AccountName +
                         "' ya no esta disponible: puente cerrado.", LogLevel.Warning);
+                    // Antes de cerrar: sin esto la app lo tomaria por AddOn caido.
+                    if (gone.Conn != null && gone.Conn.IsLoggedIn) gone.Conn.SendRaw("BROKER|0|NoConnection");
                     StopLink(gone);
                     if (_dataLink == gone) PromoteDataLink();
                 }
             }
+
+            foreach (var link in _links.Values) ReportBroker(link);
+        }
+
+        /// <summary>BROKER|1 o BROKER|0|&lt;estado&gt;: conexion de la cuenta con el
+        /// broker. Solo al cambiar, y una vez tras cada LOGIN. Lo usa la app para
+        /// distinguir "broker desconectado" de "AddOn caido".</summary>
+        private void ReportBroker(AccountLink link)
+        {
+            if (link.Stopped || link.Conn == null || !link.Conn.IsLoggedIn) return;
+            var c = link.Account != null ? link.Account.Connection : null;
+            int ok = (c != null && c.Status == ConnectionStatus.Connected) ? 1 : 0;
+            if (ok == link.BrokerOk) return;
+            link.BrokerOk = ok;
+            link.Conn.SendRaw(ok == 1 ? "BROKER|1" : "BROKER|0|" + (c != null ? c.Status.ToString() : "NoConnection"));
         }
 
         private void StartLink(Account acct)
@@ -453,6 +478,9 @@ namespace NinjaTrader.NinjaScript.AddOns
             {
                 if (!link.Conn.IsLoggedIn)
                 {
+                    // Conexion nueva: la app no sabe el estado del broker. El
+                    // AccountScanLoop lo manda en cuanto entre el LOGIN.
+                    link.BrokerOk = -1;
                     if (link.Conn.Connect())
                     {
                         failCount = 0;
@@ -715,6 +743,10 @@ namespace NinjaTrader.NinjaScript.AddOns
                 // orden es aceptada, no solo al Filled: maxima ventana para cancelar.
                 if (ReactiveMode)
                 {
+                    if ((e.OrderState == OrderState.Filled || e.OrderState == OrderState.PartFilled)
+                        && link.ReactiveDenied.ContainsKey(e.Order))
+                        DeshacerLlenado(link, e.Order);
+
                     string nm = e.Order.Name ?? "";
                     if (!nm.StartsWith("ATP_", StringComparison.Ordinal) &&
                         (e.OrderState == OrderState.Accepted || e.OrderState == OrderState.Working ||
@@ -780,7 +812,7 @@ namespace NinjaTrader.NinjaScript.AddOns
 
             if (resp.StartsWith("ALLOW", StringComparison.Ordinal)) return;
 
-            Log("AutomaticTradingNT8: REACTIVO DENY (" + link.AccountName + ") -> cancelar/cerrar " +
+            Log("AutomaticTradingNT8: REACTIVO DENY (" + link.AccountName + ") -> cancelar " +
                 o.Instrument.FullName + " (" + resp + ")", LogLevel.Warning);
             CancelOrFlatten(link, o);
         }
@@ -795,29 +827,56 @@ namespace NinjaTrader.NinjaScript.AddOns
             return false; // Sell, BuyToCover = cierres
         }
 
+        // Se deniega LA ORDEN, no la posicion. Antes, ademas de cancelarla, se
+        // aplanaba el instrumento entero: una limit de promediado rechazada por
+        // el limite de lotes intento cerrar a mercado los 2 contratos que YA
+        // estaban abiertos y cumplian (FundedNext, 2026-10-12; lo salvo que
+        // Tradovate rechazara el cierre). Ahora: cancelar la orden y deshacer solo
+        // lo que ella haya llenado.
         private void CancelOrFlatten(AccountLink link, Order o)
         {
             try
             {
-                // 1) Si la orden sigue viva, cancelarla. Por EsOrdenViva, no por una
-                //    lista de estados "buenos".
+                link.ReactiveDenied.TryAdd(o, 0);
+                // Por EsOrdenViva, no por una lista de estados "buenos".
                 if (EsOrdenViva(o))
-                {
                     link.Account.Cancel(new[] { o });
-                }
-                // 2) Si ya habia posicion (o lleno mientras ibamos), aplanarla.
-                //    NT8 netea: esto cierra TODA la posicion del instrumento.
-                var pos = link.Account.Positions.FirstOrDefault(p => p.Instrument == o.Instrument && p.MarketPosition != MarketPosition.Flat);
-                if (pos != null)
-                {
-                    var action = pos.MarketPosition == MarketPosition.Long ? OrderAction.Sell : OrderAction.BuyToCover;
-                    var close = link.Account.CreateOrder(pos.Instrument, action, OrderType.Market, OrderEntry.Automated,
-                        TimeInForce.Gtc, Math.Abs(pos.Quantity), 0, 0, string.Empty, "ATP_reactive_close",
-                        Core.Globals.MaxDate, null);
-                    link.Account.Submit(new[] { close });
-                }
+                DeshacerLlenado(link, o);
             }
             catch (Exception ex) { Log("AutomaticTradingNT8: CancelOrFlatten: " + ex.Message, LogLevel.Warning); }
+        }
+
+        // Cierra a mercado los contratos que la orden denegada llego a llenar y
+        // aun no se han deshecho. Nunca mas que la posicion: no puede darla la
+        // vuelta.
+        private void DeshacerLlenado(AccountLink link, Order o)
+        {
+            try
+            {
+                int cantidad;
+                lock (link.ReactiveDenied)
+                {
+                    int hecho;
+                    if (!link.ReactiveDenied.TryGetValue(o, out hecho)) return;
+                    cantidad = o.Filled - hecho;
+                    if (cantidad <= 0) return;
+                    link.ReactiveDenied[o] = o.Filled;
+                }
+
+                bool compra = o.OrderAction == OrderAction.Buy;
+                var pos = link.Account.Positions.FirstOrDefault(p => p.Instrument == o.Instrument
+                    && p.MarketPosition == (compra ? MarketPosition.Long : MarketPosition.Short));
+                if (pos == null) return;
+                cantidad = Math.Min(cantidad, Math.Abs(pos.Quantity));
+
+                var close = link.Account.CreateOrder(pos.Instrument, compra ? OrderAction.Sell : OrderAction.BuyToCover,
+                    OrderType.Market, OrderEntry.Automated, TimeInForce.Gtc, cantidad, 0, 0, string.Empty,
+                    "ATP_reactive_close", Core.Globals.MaxDate, null);
+                link.Account.Submit(new[] { close });
+                Log("AutomaticTradingNT8: REACTIVO deshace " + cantidad + " contrato(s) llenados por la orden denegada en "
+                    + o.Instrument.FullName + ".", LogLevel.Warning);
+            }
+            catch (Exception ex) { Log("AutomaticTradingNT8: DeshacerLlenado: " + ex.Message, LogLevel.Warning); }
         }
 
         private void OnExecutionUpdate(AccountLink link, ExecutionEventArgs e)
