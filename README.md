@@ -20,8 +20,13 @@ Pensado para cuentas de fondeo, donde el límite no se negocia.
   tiempo real, no al cierre del día.
 - **Límites de tamaño**: máximo de lotes o contratos en total y por activo.
 - **Margen**: nivel mínimo exigido y tope de margen usado.
-- **Exposición por divisa**: suma lo que arriesgas en cada moneda aunque venga de
-  robots, símbolos y terminales distintos.
+- **Exposición por divisa, neta**: suma lo que arriesgas en cada moneda aunque
+  venga de robots, símbolos y terminales distintos, y lo mide como las reglas de
+  las cuentas de fondeo: comprar EURUSD y comprar USDJPY se compensan en dólares.
+  Las divisas de cada símbolo las da el bróker, y una orden que reduce la
+  exposición pasa siempre.
+- **Cada grupo de límites se enciende y se apaga** con su casilla, sin perder su
+  valor.
 - **Cierre preventivo.** Cierra posiciones *antes* de tocar el límite en vez de
   esperar a incumplirlo. Es la diferencia entre una cuenta de fondeo viva y una
   cuenta perdida.
@@ -43,6 +48,28 @@ Cada operación se valida **antes** de salir al bróker, no después.
 - Avisos en el momento de lo que suele descubrirse tarde: el botón *Algo Trading*
   apagado en MetaTrader, una segunda copia de la aplicación ya en marcha.
 - Registro en fichero para soporte, en `%APPDATA%\AutomaticTrading\logs`.
+
+### Notificaciones por Telegram
+
+Los incidentes llegan a tu móvil (y a Telegram en el escritorio), aunque la
+aplicación corra en un VPS que no estás mirando.
+
+- **Se vincula con un clic** desde la pestaña Notificaciones con el bot oficial
+  `@AT_notification01bot`. Un chat por licencia: los avisos de tus equipos
+  llegan ahí, cada uno con el nombre del equipo.
+- **Qué avisa**, cada tipo con su casilla: drawdown total o diario y margen
+  mínimo alcanzados; terminal de MetaTrader desconectado y de vuelta; robot
+  desconectado y reconectado; NinjaTrader sin AddOn o **sin conexión con el
+  bróker**; Señal Online caída.
+- **Aunque la aplicación esté cerrada**: tu licencia caduca en 3 días y en 1
+  día, y alguien solicita seguir tu Señal.
+- **Vigilar este equipo**: si la aplicación se cuelga, se cierra sin avisar o el
+  VPS pierde la red, el servidor te avisa a los 10-15 minutos. Cerrarla con
+  normalidad no avisa.
+- **Sin ruido**: un corte breve no avisa, varios robots que caen a la vez llegan
+  en un solo mensaje, y decides si un aviso se repite y cada cuánto.
+- **Privacidad**: los mensajes no llevan número de cuenta, saldo ni clave de
+  licencia. Cada aviso queda también en el Registro de eventos.
 
 ### MetaTrader 5 y NinjaTrader 8 en el mismo panel
 
@@ -92,6 +119,12 @@ Cada operación se valida **antes** de salir al bróker, no después.
   tiene su spread y su llenado.
 - Se copian también las **ampliaciones y los cierres parciales**, no solo la
   apertura y el cierre.
+- **Órdenes mayores que el máximo del bróker, repartidas.** Si una copia supera
+  lo que el símbolo admite por orden, entra en partes (6 lotes con máximo 5:
+  5 + 1) que se gestionan como una sola operación, con una **pausa entre partes**
+  configurable (12 s por defecto) para no parecer alta frecuencia en cuentas de
+  fondeo. Si se supera el máximo total del símbolo, eliges rechazar la copia o
+  abrir lo que quepa.
 - **Reglas a tu medida**: filtrar por robot de origen, multiplicar o dividir el
   tamaño, **invertir la operación**, retrasar la entrada, y etiquetar la copia en
   destino con el origen (robot, ticket y terminal) para saber siempre de dónde
@@ -151,6 +184,7 @@ Cada operación se valida **antes** de salir al bróker, no después.
   El resto del puente —cinta, L2 y copia de señales— funciona sin él.
 - **Conexión a internet**: la licencia se valida contra el servidor en cada
   arranque.
+- Las notificaciones necesitan una cuenta de **Telegram**.
 
 ## Qué hay en este repositorio
 
