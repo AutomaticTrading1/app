@@ -1,6 +1,6 @@
 # Manual de usuario — AT OrderFlow Footprint
 
-Versión: 4.37+.
+Versión: 4.38+.
 
 Guía de **uso**: qué ves en pantalla, qué hace cada botón y para qué sirve.
 No hay código aquí.
@@ -160,7 +160,7 @@ VP, Table y Header**; el resto lo enciendes tú.
 
 | Botón | Qué te da | Cuándo encenderlo |
 |---|---|---|
-| **Zones** | Zonas de oferta/demanda en swings con volumen | Marcar de dónde salió el movimiento |
+| **Zones** | Zonas de oferta/demanda en swings con volumen destacado, sobre 300 velas de historia | Marcar de dónde salió el movimiento |
 | **Swings** | Estructura: HH / HL / LH / LL y divergencia RSI (`÷div`) | Si operas estructura |
 | **BOS** | Ruptura de estructura: línea al nivel roto + etiqueta **BOS** | Confirmar cambio de carácter |
 | **Sweep** | Barrido: el precio pasa el swing pero **cierra de vuelta** | Cazar trampas de liquidez |
@@ -175,7 +175,7 @@ VP, Table y Header**; el resto lo enciendes tú.
 | **DeMark** | Pivotes DeMark: **solo PP, R1 y S1** | Cuando quieres una única referencia limpia |
 | **Murrey** | Murrey Math: cuadrícula de octavos, de 0/8 a 8/8 (más ±1/8, ±2/8) | Marco de precio "cuadriculado" |
 | **VolPiv** | Volatility pivot: **una** línea que camina con el precio | Como stop dinámico / filtro de tendencia |
-| **Session** | Máximo y mínimo de la última sesión cerrada de Asia, Londres y Nueva York, **con el tramo horario de cada una marcado** | Para operar contra el rango de la sesión anterior |
+| **Session** | Máximo y mínimo de la última sesión cerrada de Asia, Londres y Nueva York, y las marcas de los **3 últimos días** | Para operar contra el rango de la sesión anterior |
 | **PDH/PDL** | Máximo y mínimo del día anterior | Casi siempre: son objetivos de liquidez |
 
 **Todas son independientes: enciende las que uses y apaga el resto.** Cada etiqueta
@@ -230,10 +230,11 @@ Detalle de qué mira cada una:
 - **VolPiv** — las velas de la **temporalidad que tengas puesta**. No es un nivel
   fijo: es un stop por volatilidad que persigue al precio y solo se aprieta. **Verde**
   = el precio está por encima (sesgo alcista) · **rojo** = por debajo.
-- **Session** — la **última sesión ya cerrada** de cada plaza, mirada en velas de 5
-  minutos (no en la temporalidad del gráfico: en H1 se perdería el corte de las 09:30
-  de Nueva York). Seis líneas, un par por plaza, cada una del color que esa plaza
-  tiene en la tira de sesión. Ver el detalle en **5.6**.
+- **Session** — las sesiones ya cerradas de cada plaza de los **3 últimos días**,
+  miradas en velas de 5 minutos (no en la temporalidad del gráfico: en H1 se perdería
+  el corte de las 09:30 de Nueva York). **Línea horizontal solo la última cerrada** —
+  seis en total, un par por plaza—; de los días anteriores quedan sus marcas locales
+  sobre sus propias velas. Ver el detalle en **5.6**.
 
 **De dónde sale cada rango, dibujado.** Cuando enciendes cualquier familia que dependa
 de un máximo y un mínimo, el gráfico marca **con qué** se ha calculado:
@@ -636,6 +637,7 @@ tal como aparece en esa lista**.
 | …y afinar esa granularidad | *Celdas objetivo por ATR de barra (granularidad)* | Más celdas = rejilla más fina (12 por defecto) |
 | …o fijarlo yo a mano | *Ticks/Pips Per Price Level (según StepMode)* | Solo si pones la semilla automática en `false` |
 | Más o menos velas en pantalla | *Nº de velas de footprint a mostrar (pocas y anchas)* | 24 por defecto |
+| Que el perfil, la tabla, el histograma y el CVD lleguen más a la izquierda | *N velas a analizar/reconstruir desde ticks* **y** *Max Bars to Display* | 50 por defecto, los dos a la vez. Son los únicos paneles que no se pueden estirar sin reconstruir más velas: necesitan el reparto compra/venta, que sale de los ticks. Se paga al cargar |
 | Más historial reconstruido al cargar | *N velas a analizar/reconstruir desde ticks* | Sube a la par *Max Bars to Display*; si no, solo esperas más |
 | Columnas más anchas | *Ancho de columna a zoom 1 (px)* | 72 por defecto |
 | Filas más altas (que quepan las marcas) | *Alto de fila de precio (px)* | 14 por defecto |

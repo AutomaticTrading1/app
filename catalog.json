@@ -12,9 +12,9 @@
       "platform": "mt5",
       "kind": "Experts",
       "file": "AT_OrderFlow_Footprint.ex5",
-      "version": "4.37",
-      "sha256": "96c84c72f5e7ae6a925ec39412464e4a885f1e22b7a8d9d5d4774d9651084cb7",
-      "notes": "Arreglado el desplazamiento de todo lo dibujado con el zoom alejado: el alto de fila que posiciona la rejilla se acotaba a un pixel, y ese redondeo separaba los niveles, BOS/SWEEP, medias y zonas de su precio cuanto mas lejos del ancla. Al conmutar el boton MT5 el eje ya no queda desplazado un frame. La estructura vuelve a marcar las primeras velas de la pantalla (antes descartaba 60 px de la izquierda, que son el eje de la rejilla propia). Las marcas de absorcion van con las celdas: sin ellas quedaba un cuadradito suelto sobre las velas. Fibo: ahora sale del tramo con trece niveles y una sola escala (0% en el extremo mas reciente de ayer, 100% en el mas antiguo); los negativos son los objetivos de proyeccion y los de mas de 100% quedan por detras del arranque. Cada linea del fibo lleva etiqueta en los dos extremos.",
+      "version": "4.38",
+      "sha256": "0bda260ae0846dc93771837e2ca4df92c35829ebceca4d995358ae63e84a2de8",
+      "notes": "Lo que se dibuja ya no se corta donde acaba el footprint. Las zonas de oferta/demanda se buscaban dentro de las velas reconstruidas (dos docenas) y casi no aparecian: ahora se buscan sobre 300 velas del grafico, la misma ventana que la estructura. Las medias y el VWAP se cortaban a media pantalla porque recibian el numero de columnas del footprint; ahora recorren las velas visibles. Los niveles de sesion miran tres dias, los mismos que la tira del pie, pero con linea horizontal solo de la ultima sesion cerrada: de los dias anteriores queda la diagonal de su rango y la barra con su tramo horario sobre sus propias velas. Y la ventana de reconstruccion sube de 24 a 50 velas, que es lo unico que estira el perfil de volumen, la tabla por barra, el histograma y el CVD: esos cuatro necesitan el reparto compra/venta de cada vela y solo sale de reproducir sus ticks, asi que se nota al cargar.",
       "min_app": "1.6",
       "manual": "AT_OrderFlow_Footprint.md"
     },
