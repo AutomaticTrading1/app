@@ -12,9 +12,9 @@
       "platform": "mt5",
       "kind": "Experts",
       "file": "AT_OrderFlow_Footprint.ex5",
-      "version": "4.38",
-      "sha256": "0bda260ae0846dc93771837e2ca4df92c35829ebceca4d995358ae63e84a2de8",
-      "notes": "Lo que se dibuja ya no se corta donde acaba el footprint. Las zonas de oferta/demanda se buscaban dentro de las velas reconstruidas (dos docenas) y casi no aparecian: ahora se buscan sobre 300 velas del grafico, la misma ventana que la estructura. Las medias y el VWAP se cortaban a media pantalla porque recibian el numero de columnas del footprint; ahora recorren las velas visibles. Los niveles de sesion miran tres dias, los mismos que la tira del pie, pero con linea horizontal solo de la ultima sesion cerrada: de los dias anteriores queda la diagonal de su rango y la barra con su tramo horario sobre sus propias velas. Y la ventana de reconstruccion sube de 24 a 50 velas, que es lo unico que estira el perfil de volumen, la tabla por barra, el histograma y el CVD: esos cuatro necesitan el reparto compra/venta de cada vela y solo sale de reproducir sus ticks, asi que se nota al cargar.",
+      "version": "4.39",
+      "sha256": "d7f8be0ed219c3febd336c655aa4090cd0ef0600f3d32e906e7839884af57ccd",
+      "notes": "Mejoras en la deteccion del horario del broker.",
       "min_app": "1.6",
       "manual": "AT_OrderFlow_Footprint.md"
     },
