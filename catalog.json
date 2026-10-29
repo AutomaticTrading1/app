@@ -2,6 +2,15 @@
   "items": [
     {
       "platform": "mt5",
+      "kind": "AgenteIA",
+      "file": "AT_Constructor.ex5",
+      "version": "1.0",
+      "sha256": "439b42961d3dcbde16931d5e8bf02712af2fc5fc258a1667b9596bc2a7014c08",
+      "notes": "EA interprete del Agente IA > Constructor: ejecuta las reglas que disenas en esa pestana. Se instala y se actualiza desde alli, no desde Indicadores y Estrategias. Necesita la aplicacion 1.7.8.",
+      "min_app": "1.7.8"
+    },
+    {
+      "platform": "mt5",
       "kind": "Experts",
       "file": "AT_eur50_reversal.ex5",
       "version": "1.03",

@@ -10,6 +10,38 @@ Prueba gratuita de 15 días desde la propia aplicación, sin tarjeta.
 
 ---
 
+## Novedades de la versión 1.7.8
+
+### Agente IA (módulo nuevo)
+
+- **Análisis:** chat sobre el mercado con preguntas rápidas. Usa los datos de
+  Noticias → Análisis si los tienes, o busca titulares en la web.
+- **Operativa:** reglas que el agente ejecuta sobre una cuenta de MetaTrader 5 o
+  NinjaTrader, a la hora o al cierre de vela que elijas. La IA solo propone: la
+  aplicación valida, calcula el lote por riesgo y pasa cada entrada por los
+  mismos filtros que un EA (Control del Riesgo, Noticias, Régimen).
+  Confirmación opcional en la pestaña o por Telegram, y gestión de la posición
+  (break-even, trailing, parcial, cierre por hora).
+- **Constructor:** diseña tu propia estrategia para MetaTrader 5 en pasos, sin
+  escribir código. Parte de tu idea (con capturas, PDF o subtítulos), de una
+  biblioteca de 25 estrategias clásicas o de ideas de la IA para el mercado de
+  los últimos días. La regla la ejecuta un único EA, **AT_Constructor**. Antes
+  de generar, la aplicación cuenta cuántas señales habría dado la regla en el
+  último año y avisa si el lote no llega al mínimo del bróker.
+- **IA gratuita o de pago, a tu elección:** Groq, Google Gemini, OpenRouter,
+  Pollinations, OpenAI, DeepSeek, Mistral, Cerebras o una IA en tu propio equipo
+  (Ollama, LM Studio).
+
+### Noticias
+
+- **Subpestaña Análisis:** cotizaciones con gráfico, calendario económico,
+  curvas de tipos de cinco países, COT, titulares de medios y bancos centrales,
+  resultados empresariales y balances de la SEC. Eliges qué paneles ves.
+- **Aviso por Telegram** unos minutos antes de cada noticia de los impactos
+  marcados.
+
+---
+
 ## Qué hace
 
 ### Control de riesgo
@@ -159,7 +191,8 @@ aplicación corra en un VPS que no estás mirando.
 
 ### Y además
 
-- Español e inglés. Bajo consumo de recursos.
+- Español e inglés. Modo claro y modo oscuro. Bajo consumo de recursos.
+- Se adapta a cualquier tamaño de pantalla, del portátil al monitor grande.
 - Soporte por correo, WhatsApp y Telegram desde el propio menú de Ayuda.
 
 ## Requisitos
@@ -185,6 +218,8 @@ aplicación corra en un VPS que no estás mirando.
 - **Conexión a internet**: la licencia se valida contra el servidor en cada
   arranque.
 - Las notificaciones necesitan una cuenta de **Telegram**.
+- El **Agente IA** necesita un proveedor de IA: hay opciones gratuitas con
+  registro, y para operar se exige uno con clave o una IA local.
 
 ## Qué hay en este repositorio
 
