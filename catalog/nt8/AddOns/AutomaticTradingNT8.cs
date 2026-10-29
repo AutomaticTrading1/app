@@ -1276,6 +1276,77 @@ namespace NinjaTrader.NinjaScript.AddOns
             {
                 SendSymbols(link);
             }
+            else if (cmd == "CMD_IA_MARKET" && parts.Length >= 5)
+            {
+                // CMD_IA_MARKET|<req>|<simbolo>|<minutos>|<velas> (Agente IA > Operativa)
+                int minutes, nBars;
+                if (!int.TryParse(parts[3], NumberStyles.Integer, CultureInfo.InvariantCulture, out minutes))
+                    minutes = 60;
+                if (!int.TryParse(parts[4], NumberStyles.Integer, CultureInfo.InvariantCulture, out nBars))
+                    nBars = 100;
+                SendIaMarket(link, parts[1], parts[2], minutes, nBars);
+            }
+        }
+
+        // ------------------------- datos para el Agente IA (CMD_IA_MARKET) -------------------------
+
+        /// <summary>Responde IA_MARKET|&lt;req&gt;|&lt;simbolo&gt;|ok|tick|valor_punto|ultimo|bid|ask|velas
+        /// (velas: "t,o,h,l,c;..." con t en epoch UTC) o IA_MARKET|&lt;req&gt;|&lt;simbolo&gt;|error|motivo.
+        /// La app lo pide solo cuando una regla de Operativa se ejecuta.</summary>
+        private void SendIaMarket(AccountLink link, string reqId, string symbol, int minutes, int nBars)
+        {
+            if (link == null || link.Conn == null || !link.Conn.IsLoggedIn) return;
+            string head = "IA_MARKET|" + reqId + "|" + symbol + "|";
+            var instr = ResolveInstrument(symbol);
+            if (instr == null || instr.MasterInstrument == null)
+            {
+                link.Conn.SendRaw(head + "error|instrumento no resuelto en NinjaTrader");
+                return;
+            }
+            try
+            {
+                var period = minutes >= 1440
+                    ? new BarsPeriod { BarsPeriodType = BarsPeriodType.Day, Value = 1 }
+                    : new BarsPeriod { BarsPeriodType = BarsPeriodType.Minute, Value = Math.Max(1, minutes) };
+                var req = new BarsRequest(instr, Math.Max(10, Math.Min(nBars, 500)));
+                req.BarsPeriod = period;
+                req.Request((r, err, msg) =>
+                {
+                    try
+                    {
+                        if (err != ErrorCode.NoError || r == null || r.Bars == null || r.Bars.Count == 0)
+                        {
+                            link.Conn.SendRaw(head + "error|sin velas (" + Clean(msg) + ")");
+                            return;
+                        }
+                        var bars = r.Bars;
+                        var sb = new StringBuilder();
+                        for (int i = 0; i < bars.Count; i++)
+                        {
+                            if (i > 0) sb.Append(';');
+                            sb.Append(new DateTimeOffset(bars.GetTime(i).ToUniversalTime()).ToUnixTimeSeconds())
+                              .Append(',').Append(Num(bars.GetOpen(i))).Append(',').Append(Num(bars.GetHigh(i)))
+                              .Append(',').Append(Num(bars.GetLow(i))).Append(',').Append(Num(bars.GetClose(i)));
+                        }
+                        var md = instr.MarketData;
+                        double last = bars.GetClose(bars.Count - 1);
+                        double bid = md != null && md.Bid != null ? md.Bid.Price : 0;
+                        double ask = md != null && md.Ask != null ? md.Ask.Price : 0;
+                        var mi = instr.MasterInstrument;
+                        link.Conn.SendRaw(head + "ok|" + Num(mi.TickSize) + "|" + Num(mi.PointValue) + "|" +
+                                          Num(last) + "|" + Num(bid) + "|" + Num(ask) + "|" + sb.ToString());
+                    }
+                    catch (Exception ex) { link.Conn.SendRaw(head + "error|" + Clean(ex.Message)); }
+                    finally { if (r != null) r.Dispose(); }
+                });
+            }
+            catch (Exception ex) { link.Conn.SendRaw(head + "error|" + Clean(ex.Message)); }
+        }
+
+        // Un motivo de error viaja dentro de una linea con '|' como separador.
+        private static string Clean(string s)
+        {
+            return (s ?? "").Replace('|', ' ').Replace('\n', ' ').Replace('\r', ' ');
         }
 
         // ------------------------- instrumentos disponibles (CMD_SYMBOLS) -------------------------

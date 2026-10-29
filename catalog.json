@@ -74,9 +74,9 @@
       "platform": "nt8",
       "kind": "AddOns",
       "file": "AutomaticTradingNT8.cs",
-      "version": "1.77",
-      "sha256": "c153ef03e4c01ed5477270208e3bae0dab624cdacecd38f45d880aa53b0975e8",
-      "notes": "AddOn puente para NinjaTrader 8: gate de riesgo, copia de senales y datos compartidos con MT5. Puentea todas las cuentas conectadas a la vez, cada una como su propio terminal. Novedades 1.77: una orden denegada ya no cierra la posicion que tenias. Con el modo reactivo (ordenes manuales, de Chart Trader o de terceros), al denegar una entrada nueva se aplanaba el instrumento entero; ahora se cancela solo esa orden y, si llego a llenarse, se deshace solo lo que ella metio, tambien cuando el llenado llega despues de cancelarla. Ademas, el AddOn informa a la aplicacion de la conexion de cada cuenta con el broker, para avisar por Telegram cuando se pierde y cuando vuelve. Tras instalarlo hay que recompilar en NinjaScript (F5).",
+      "version": "1.78",
+      "sha256": "147d06e0b24b5d91bff7e713cf2b27b51c318219c9eaaaf8400288c47723faee",
+      "notes": "AddOn puente para NinjaTrader 8: gate de riesgo, copia de senales y datos compartidos con MT5. Puentea todas las cuentas conectadas a la vez, cada una como su propio terminal. Novedades 1.78: responde a las peticiones de datos de mercado (precio, tamano y valor del tick y velas) de la Operativa del Agente IA, que llega con la aplicacion 1.7.8. No cambia nada mas: con una aplicacion anterior funciona igual que la 1.77. Tras instalarlo hay que recompilar en NinjaScript (F5).",
       "min_app": "1.7"
     }
   ]
