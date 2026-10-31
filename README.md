@@ -10,6 +10,22 @@ Prueba gratuita de 15 días desde la propia aplicación, sin tarjeta.
 
 ---
 
+## Novedades de la versión 1.7.9
+
+### Guía de inicio en cada pestaña
+
+La primera vez que abres una pestaña, una guía corta te enseña para qué sirve
+cada apartado, con un bocadillo que señala el control del que habla. Al final
+tienes los vídeos del canal sobre ese tema. Cuando quieras repasarla, el botón
+azul **Guía**, junto a las pestañas, la vuelve a abrir.
+
+### Noticias
+
+- **Panel «Fed: probabilidades del FOMC»** en Noticias → Análisis: para cada
+  reunión de la Reserva Federal, el tipo esperado, el cambio acumulado en puntos
+  básicos y el rango más probable con su porcentaje, calculado con el método de
+  CME FedWatch a partir de los futuros de fondos federales.
+
 ## Novedades de la versión 1.7.8
 
 ### Agente IA (módulo nuevo)
