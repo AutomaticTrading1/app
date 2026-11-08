@@ -10,6 +10,56 @@ Prueba gratuita de 15 días desde la propia aplicación, sin tarjeta.
 
 ---
 
+## Novedades de la versión 1.7.10
+
+### Agente IA
+
+- **SL, TP y volumen, a tu elección**, en Operativa y en Constructor. El SL y
+  el TP los da tu estrategia, o los eliges tú: en puntos, por ATR, en dinero, o
+  sin SL o sin TP (con aviso). El volumen, por % de riesgo, por dinero de riesgo
+  o con lote fijo. Si la estrategia no da el SL y no has elegido otro, no se
+  opera: el agente nunca se lo inventa.
+- **Break-even por dinero** y **cierre tras N velas**.
+- **Botón Duplicar** para reglas y estrategias.
+- **Datos de Noticias → Análisis para el agente:** cada regla elige qué paneles
+  le manda (calendario, curvas de tipos, COT, titulares, Fed, acciones...), sin
+  que tenga que buscarlos en la web.
+- **Registro de decisiones con el detalle completo** de cada una.
+
+### Noticias → Análisis
+
+- **Panel Acciones** (antes Nasdaq-100): Nasdaq-100, S&P 500, Dow Jones 30,
+  Euro Stoxx 50, DAX 40, CAC 40, FTSE 100 e IBEX 35, con la composición de
+  fuente oficial, el peso de cada valor en el índice y la fecha de cada
+  cotización.
+- **Listas propias** (por ejemplo, «Mineras de oro»), que también puede recibir
+  el Agente IA. Se llenan sin saberse ningún símbolo: desde un índice, por
+  **sector e industria** (las mayores empresas de una industria en 24 países) o
+  con **ETF por tema** (índices, sectores, oro y mineras, materias primas,
+  bonos, países, apalancados...).
+- **Balances de empresas de cualquier bolsa**, no solo de EE. UU.
+- **Buscador** en Acciones, Titulares y el calendario de noticias.
+
+### En toda la aplicación
+
+- **Ordena cualquier tabla** pulsando su cabecera: de mayor a menor, de menor a
+  mayor y vuelta al orden original.
+- **Trading deshabilitado por el bróker:** si el bróker quita el trading a una
+  cuenta (caducada, suspendida o de solo lectura), la aplicación lo detecta y
+  lo avisa en Control del Riesgo, en el Registro y en Señales con el punto
+  rojo, en vez de seguir enviando órdenes que el bróker rechaza.
+- **Primera activación más clara:** la prueba gratuita de 15 días va primero;
+  la clave de licencia, aparte, para quien ya la compró.
+
+### Correcciones
+
+- **El cierre preventivo de Control del Riesgo y los cierres del Agente IA no
+  se ejecutaban** en MetaTrader 5: el terminal rechazaba la orden por un
+  comentario demasiado largo.
+- **La copia de Señales podía quedarse parada sin avisar** mientras la
+  aplicación iba ocupando memoria. Corregido, y si vuelve a detenerse, avisa
+  por Telegram.
+
 ## Novedades de la versión 1.7.9
 
 ### Guía de inicio en cada pestaña

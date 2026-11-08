@@ -667,6 +667,10 @@ namespace NinjaTrader.NinjaScript.AddOns
 
                 bool first = true;
                 var qtyPorMagic = new Dictionary<long, int>();
+                // Lo mismo sin el pnl: decide cuando se escribe en el log. Con el
+                // pnl dentro cambiaba en cada STATE y escribia una linea cada 2 s
+                // mientras habia posicion (5.080 el 2026-11-06).
+                var clave = new StringBuilder();
                 foreach (var p in link.Account.Positions.Where(p => p.MarketPosition != MarketPosition.Flat))
                 {
                     if (!first) sb.Append(';');
@@ -698,6 +702,9 @@ namespace NinjaTrader.NinjaScript.AddOns
                       .Append(Num(Math.Abs(p.Quantity))).Append(':').Append(Num(p.AveragePrice)).Append(':')
                       .Append(Num(slPrice)).Append(':').Append(Num(tpPrice)).Append(':')
                       .Append(Num(unrealized)).Append(':').Append(magic);
+                    clave.Append(ticket).Append(':').Append(type).Append(':')
+                         .Append(Num(Math.Abs(p.Quantity))).Append(':').Append(Num(p.AveragePrice)).Append(':')
+                         .Append(Num(slPrice)).Append(':').Append(Num(tpPrice)).Append(';');
                 }
 
                 // El bracket tiene que parecerse a la posicion. Va sobre el ESTADO y
@@ -710,9 +717,10 @@ namespace NinjaTrader.NinjaScript.AddOns
                 int corte = posCsv.IndexOf('|');
                 for (int i = 0; i < 4 && corte >= 0; i++) corte = posCsv.IndexOf('|', corte + 1);
                 string soloPos = corte >= 0 && corte + 1 < posCsv.Length ? posCsv.Substring(corte + 1) : "";
-                if (soloPos != link.LastPositionsCsv)
+                string sinPnl = clave.ToString();
+                if (sinPnl != link.LastPositionsCsv)
                 {
-                    link.LastPositionsCsv = soloPos;
+                    link.LastPositionsCsv = sinPnl;
                     Log("AutomaticTradingNT8: STATE de " + link.AccountName + " — posiciones: " +
                         (soloPos.Length == 0 ? "(ninguna)" : soloPos) +
                         "   [formato ticket:instrumento:tipo:cantidad:precio:sl:tp:pnl:magic]",

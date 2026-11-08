@@ -83,9 +83,9 @@
       "platform": "nt8",
       "kind": "AddOns",
       "file": "AutomaticTradingNT8.cs",
-      "version": "1.78",
-      "sha256": "147d06e0b24b5d91bff7e713cf2b27b51c318219c9eaaaf8400288c47723faee",
-      "notes": "AddOn puente para NinjaTrader 8: gate de riesgo, copia de senales y datos compartidos con MT5. Puentea todas las cuentas conectadas a la vez, cada una como su propio terminal. Novedades 1.78: responde a las peticiones de datos de mercado (precio, tamano y valor del tick y velas) de la Operativa del Agente IA, que llega con la aplicacion 1.7.8. No cambia nada mas: con una aplicacion anterior funciona igual que la 1.77. Tras instalarlo hay que recompilar en NinjaScript (F5).",
+      "version": "1.79",
+      "sha256": "f34789bd0506961bf80a6f04098f4c58b5c4d14c2a03308f9403ab88d2ce6e95",
+      "notes": "AddOn puente para NinjaTrader 8: gate de riesgo, copia de senales y datos compartidos con MT5. Puentea todas las cuentas conectadas a la vez, cada una como su propio terminal. Novedades 1.79: deja de escribir en su log una linea de estado cada 2 segundos mientras hay una posicion abierta (el beneficio contaba como cambio); ahora solo cuando cambia la posicion, el SL o el TP. No cambia nada mas: funciona con cualquier aplicacion 1.7. Tras instalarlo hay que recompilar en NinjaScript (F5).",
       "min_app": "1.7"
     }
   ]
