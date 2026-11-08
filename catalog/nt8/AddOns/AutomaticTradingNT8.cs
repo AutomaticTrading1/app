@@ -48,6 +48,11 @@ namespace NinjaTrader.NinjaScript.AddOns
 {
     public class AutomaticTradingNT8 : AddOnBase
     {
+        // Version del AddOn: la misma que su "version" en el catalog.json publico.
+        // Sale en el Log de NinjaTrader al arrancar y la lee la aplicacion
+        // (pestaña NinjaTrader) del fichero instalado: SUBIRLA al publicar.
+        public const string Version = "1.80";
+
         // ===================== CONFIGURACION =====================
         private const string ServerHost = "127.0.0.1";
         private const int ServerPort = 5006;
@@ -239,6 +244,7 @@ namespace NinjaTrader.NinjaScript.AddOns
 
         private void Start()
         {
+            Log("AutomaticTradingNT8 v" + Version + " iniciado.", LogLevel.Information);
             _running = true;
             SyncAccounts();     // alta inmediata de las cuentas que ya estan conectadas
             _scanThread = new Thread(AccountScanLoop) { IsBackground = true, Name = "AutomaticTradingNT8-Scan" };
