@@ -4,10 +4,10 @@
       "platform": "mt5",
       "kind": "AgenteIA",
       "file": "AT_Constructor.ex5",
-      "version": "1.0",
-      "sha256": "439b42961d3dcbde16931d5e8bf02712af2fc5fc258a1667b9596bc2a7014c08",
-      "notes": "EA interprete del Agente IA > Constructor: ejecuta las reglas que disenas en esa pestana. Se instala y se actualiza desde alli, no desde Indicadores y Estrategias. Necesita la aplicacion 1.7.8.",
-      "min_app": "1.7.8"
+      "version": "1.1",
+      "sha256": "92ee58f60db7c9f04bc450faeae6152496e920cc3c80a97f0618b2028e28cb6b",
+      "notes": "EA interprete del Agente IA > Constructor: ejecuta las reglas que disenas en esa pestana. Se instala y se actualiza desde alli, no desde Indicadores y Estrategias. Novedades 1.1: el SL y el TP son opcionales (sin SL o sin TP, con aviso) y se pueden fijar en dinero; lote por dinero de riesgo, break-even por dinero y cierre tras N velas. Necesita la aplicacion 1.7.10.",
+      "min_app": "1.7.10"
     },
     {
       "platform": "mt5",
